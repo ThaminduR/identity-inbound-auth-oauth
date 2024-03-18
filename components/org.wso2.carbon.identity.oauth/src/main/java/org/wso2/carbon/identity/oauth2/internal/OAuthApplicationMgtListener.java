@@ -117,7 +117,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                                             String tenantDomain)
             throws IdentityApplicationManagementException {
 
-        addClientSecret(serviceProvider);
+        addClientSecret(serviceProvider, tenantDomain);
         return true;
     }
 
@@ -125,14 +125,14 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                                                       String clientType, String tenantDomain)
             throws IdentityApplicationManagementException {
 
-        addClientSecret(serviceProvider);
+        addClientSecret(serviceProvider, tenantDomain);
         return true;
     }
 
     public boolean doPostCreateApplication(ServiceProvider serviceProvider, String tenantDomain, String userName)
             throws IdentityApplicationManagementException {
 
-        addClientSecret(serviceProvider);
+        addClientSecret(serviceProvider, tenantDomain);
         return true;
     }
 
@@ -140,7 +140,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
             throws IdentityApplicationManagementException {
 
         revokeAccessTokensWhenSaaSDisabled(serviceProvider, tenantDomain);
-        addClientSecret(serviceProvider);
+        addClientSecret(serviceProvider, tenantDomain);
         updateAuthApplication(serviceProvider);
 
         if (threadLocalForClaimConfigUpdates.get()) {
@@ -155,7 +155,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                                                              String tenantDomain)
             throws IdentityApplicationManagementException {
 
-        addClientSecret(serviceProvider);
+        addClientSecret(serviceProvider, tenantDomain);
         return true;
     }
 
@@ -208,7 +208,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
     }
 
     private void deleteAssociatedOAuthApps(ServiceProvider serviceProvider, String tenantDomain)
-            throws IdentityOAuthAdminException, IdentityOAuth2Exception {
+            throws IdentityOAuthAdminException, IdentityOAuth2Exception, IdentityApplicationManagementException {
 
         Set<String> associatedOAuthConsumerKeys = getOAuthAppsAssociatedWithApplication(serviceProvider);
         for (String consumerKey : associatedOAuthConsumerKeys) {
@@ -216,7 +216,8 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                 log.debug("Removing OAuth application data for clientId: " + consumerKey + " associated with " +
                         "application: " + serviceProvider.getApplicationName() + " tenantDomain: " + tenantDomain);
             }
-            OAuth2ServiceComponentHolder.getInstance().getOAuthAdminService().removeOAuthApplicationData(consumerKey);
+            OAuthComponentServiceHolder.getInstance().getOAuthInboundConfigHandler().handleConfigDeletion(
+                    consumerKey);
         }
         removeEntriesFromCache(associatedOAuthConsumerKeys);
     }
@@ -238,15 +239,9 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                         .getInboundAuthenticationRequestConfigs()) {
                     if (OAUTH.equals(authConfig.getInboundAuthType()) ||
                             OAUTH2.equals(authConfig.getInboundAuthType())) {
-                        String inboundConfiguration = authConfig.getInboundConfiguration();
-                        if (inboundConfiguration == null || "".equals(inboundConfiguration)) {
-                            String errorMSg = String.format("No inbound configurations found for oauth in the " +
-                                            "imported %s", serviceProvider.getApplicationName());
-                            throw new IdentityApplicationManagementException(errorMSg);
-                        }
+
+                        OAuthAppDO oAuthAppDO = getOAuthAppDO(authConfig, serviceProvider);
                         User owner = serviceProvider.getOwner();
-                        OAuthAppDO oAuthAppDO = marshelOAuthDO(authConfig.getInboundConfiguration(),
-                                serviceProvider.getApplicationName(), owner.getTenantDomain());
                         oAuthAppDO.setAppOwner(new AuthenticatedUser(owner));
 
                         OAuthConsumerAppDTO oAuthConsumerAppDTO = OAuthUtil.buildConsumerAppDTO(oAuthAppDO);
@@ -262,7 +257,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                                 OAuthAppDO app = OAuth2Util.getAppInformationByClientId(oauthConsumerKey);
                                 oAuthConsumerAppDTO.setOauthConsumerSecret(app.getOauthConsumerSecret());
                             } else {
-                                oAuthConsumerAppDTO.setOauthConsumerSecret(OAuthUtil.getRandomNumber());
+                                oAuthConsumerAppDTO.setOauthConsumerSecret(OAuthUtil.getRandomNumberSecure());
                             }
                         }
 
@@ -283,6 +278,25 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
             String message = "Error occurred when importing OAuth inbound.";
             throw handleException(message, e);
         }
+    }
+
+    private OAuthAppDO getOAuthAppDO(InboundAuthenticationRequestConfig authConfig, ServiceProvider serviceProvider)
+            throws IdentityApplicationManagementException {
+
+        OAuthAppDO oAuthAppDO = (OAuthAppDO) authConfig.getInboundConfigurationProtocol();
+        String inboundConfiguration = authConfig.getInboundConfiguration();
+
+        if (oAuthAppDO != null) {
+            return oAuthAppDO;
+        } else if (StringUtils.isNotBlank(inboundConfiguration)) {
+            oAuthAppDO = marshelOAuthDO(inboundConfiguration, serviceProvider.getApplicationName(),
+                                        serviceProvider.getOwner().getTenantDomain());
+            authConfig.setInboundConfigurationProtocol(oAuthAppDO);
+            return oAuthAppDO;
+        }
+        String errorMsg = String.format("No inbound configurations found for oauth in the imported %s",
+                                        serviceProvider.getApplicationName());
+        throw new IdentityApplicationManagementException(errorMsg);
     }
 
     private IdentityApplicationManagementException handleException(String message, Exception ex) {
@@ -322,6 +336,7 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                                 !"oauthConsumerSecret".equals(property.getName())).toArray(Property[]::new));
 
                         authConfig.setInboundConfiguration(unmarshelOAuthDO(authApplication));
+                        authConfig.setInboundConfigurationProtocol(authApplication);
                         return;
                     }
                 }
@@ -362,7 +377,8 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
         }
     }
 
-    private void addClientSecret(ServiceProvider serviceProvider) throws IdentityApplicationManagementException {
+    private void addClientSecret(ServiceProvider serviceProvider, String tenantDomain)
+            throws IdentityApplicationManagementException {
 
         if (serviceProvider == null) {
             return; // if service provider is not present no need to add this information
@@ -381,7 +397,8 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                             property.setName(OAUTH2_CONSUMER_SECRET);
                             String clientSecret = null;
                             try {
-                                clientSecret = OAuth2Util.getClientSecret(inboundRequestConfig.getInboundAuthKey());
+                                clientSecret = OAuth2Util.getClientSecret(inboundRequestConfig.getInboundAuthKey(),
+                                        tenantDomain);
                             } catch (InvalidOAuthClientException e) {
                                 log.warn("The OAuth application data not exists for " +
                                         inboundRequestConfig.getInboundAuthKey());
@@ -554,9 +571,9 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
                             "service provider with id: " + appId + ". Removing the stale OAuth application for " +
                             "clientId: " + deletedConsumerKey);
                 }
-                OAuth2ServiceComponentHolder.getInstance()
-                        .getOAuthAdminService().removeOAuthApplicationData(deletedConsumerKey);
-            } catch (IdentityOAuthAdminException e) {
+                OAuthComponentServiceHolder.getInstance().getOAuthInboundConfigHandler().handleConfigDeletion(
+                        deletedConsumerKey);
+            } catch (IdentityApplicationManagementException e) {
                 String msg = "Error removing OAuth2 inbound data for clientId: %s associated with service provider " +
                         "with id: %s during application update.";
                 throw new IdentityApplicationManagementException(String.format(msg, deletedConsumerKey, appId), e);
@@ -648,24 +665,16 @@ public class OAuthApplicationMgtListener extends AbstractApplicationMgtListener 
             for (InboundAuthenticationRequestConfig authConfig : serviceProvider.getInboundAuthenticationConfig()
                     .getInboundAuthenticationRequestConfigs()) {
                 if (OAUTH.equals(authConfig.getInboundAuthType()) || OAUTH2.equals(authConfig.getInboundAuthType())) {
-                    String inboundConfiguration = authConfig.getInboundConfiguration();
-                    if (inboundConfiguration == null) {
+                    OAuthAppDO oAuthAppDO = (OAuthAppDO) authConfig.getInboundConfigurationProtocol();
+                    if (oAuthAppDO == null) {
                         return;
                     }
                     String inboundAuthKey = authConfig.getInboundAuthKey();
                     OAuthAppDAO dao = new OAuthAppDAO();
-                    OAuthAppDO oAuthAppDO;
 
                     String tenantDomain = serviceProvider.getOwner().getTenantDomain();
                     String userName = serviceProvider.getOwner().getUserName();
 
-                    try {
-                        oAuthAppDO = marshelOAuthDO(inboundConfiguration,
-                                serviceProvider.getApplicationName(), tenantDomain);
-                    } catch (IdentityApplicationManagementException e) {
-                        validationMsg.add("OAuth inbound configuration in the file is not valid.");
-                        break;
-                    }
                     if (!inboundAuthKey.equals(oAuthAppDO.getOauthConsumerKey())) {
                         validationMsg.add(String.format("The Inbound Auth Key of the  application name %s " +
                                         "is not match with Oauth Consumer Key %s.", authConfig.getInboundAuthKey(),

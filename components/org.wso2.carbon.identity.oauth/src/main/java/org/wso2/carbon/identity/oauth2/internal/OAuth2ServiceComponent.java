@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2013, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2013-2024, WSO2 LLC. (http://www.wso2.com).
  *
- * WSO2 Inc. licenses this file to you under the Apache License,
+ * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
  * You may obtain a copy of the License at
@@ -11,7 +11,7 @@
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied. See the License for the
+ * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -20,6 +20,7 @@ package org.wso2.carbon.identity.oauth2.internal;
 
 import org.apache.axiom.om.OMElement;
 import org.apache.axiom.om.impl.builder.StAXOMBuilder;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -31,12 +32,19 @@ import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.osgi.service.component.annotations.ReferencePolicy;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.identity.api.resource.mgt.APIResourceManager;
+import org.wso2.carbon.identity.application.authentication.framework.ApplicationAuthenticationService;
 import org.wso2.carbon.identity.application.authentication.framework.AuthenticationDataPublisher;
 import org.wso2.carbon.identity.application.authentication.framework.AuthenticationMethodNameTranslator;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants;
 import org.wso2.carbon.identity.application.mgt.ApplicationManagementService;
+import org.wso2.carbon.identity.application.mgt.AuthorizedAPIManagementService;
 import org.wso2.carbon.identity.application.mgt.listener.ApplicationMgtListener;
+import org.wso2.carbon.identity.consent.server.configs.mgt.services.ConsentServerConfigsManagementService;
+import org.wso2.carbon.identity.core.SAMLSSOServiceProviderManager;
+import org.wso2.carbon.identity.core.util.IdentityCoreConstants;
 import org.wso2.carbon.identity.core.util.IdentityCoreInitializedEvent;
+import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.event.handler.AbstractEventHandler;
 import org.wso2.carbon.identity.event.services.IdentityEventService;
 import org.wso2.carbon.identity.oauth.common.OAuthConstants;
@@ -44,9 +52,13 @@ import org.wso2.carbon.identity.oauth.common.token.bindings.TokenBinderInfo;
 import org.wso2.carbon.identity.oauth.config.OAuthServerConfiguration;
 import org.wso2.carbon.identity.oauth.dto.ScopeDTO;
 import org.wso2.carbon.identity.oauth.internal.OAuthComponentServiceHolder;
+import org.wso2.carbon.identity.oauth.tokenprocessor.OAuth2RevocationProcessor;
+import org.wso2.carbon.identity.oauth.tokenprocessor.RefreshTokenGrantProcessor;
+import org.wso2.carbon.identity.oauth.tokenprocessor.TokenProvider;
 import org.wso2.carbon.identity.oauth2.OAuth2ScopeService;
 import org.wso2.carbon.identity.oauth2.OAuth2Service;
 import org.wso2.carbon.identity.oauth2.OAuth2TokenValidationService;
+import org.wso2.carbon.identity.oauth2.OAuthAuthorizationRequestBuilder;
 import org.wso2.carbon.identity.oauth2.authz.validators.ResponseTypeRequestValidator;
 import org.wso2.carbon.identity.oauth2.bean.Scope;
 import org.wso2.carbon.identity.oauth2.bean.ScopeBinding;
@@ -54,32 +66,51 @@ import org.wso2.carbon.identity.oauth2.client.authentication.BasicAuthClientAuth
 import org.wso2.carbon.identity.oauth2.client.authentication.OAuthClientAuthenticator;
 import org.wso2.carbon.identity.oauth2.client.authentication.OAuthClientAuthnService;
 import org.wso2.carbon.identity.oauth2.client.authentication.PublicClientAuthenticator;
+import org.wso2.carbon.identity.oauth2.dao.AccessTokenDAO;
 import org.wso2.carbon.identity.oauth2.dao.OAuthTokenPersistenceFactory;
+import org.wso2.carbon.identity.oauth2.dao.TokenManagementDAO;
 import org.wso2.carbon.identity.oauth2.device.api.DeviceAuthService;
 import org.wso2.carbon.identity.oauth2.device.api.DeviceAuthServiceImpl;
 import org.wso2.carbon.identity.oauth2.device.response.DeviceFlowResponseTypeRequestValidator;
 import org.wso2.carbon.identity.oauth2.keyidprovider.DefaultKeyIDProviderImpl;
 import org.wso2.carbon.identity.oauth2.keyidprovider.KeyIDProvider;
 import org.wso2.carbon.identity.oauth2.listener.TenantCreationEventListener;
+import org.wso2.carbon.identity.oauth2.model.ResourceAccessControlKey;
+import org.wso2.carbon.identity.oauth2.scopeservice.APIResourceBasedScopeMetadataService;
 import org.wso2.carbon.identity.oauth2.scopeservice.ScopeMetadataService;
 import org.wso2.carbon.identity.oauth2.token.bindings.TokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.handlers.TokenBindingExpiryEventHandler;
+import org.wso2.carbon.identity.oauth2.token.bindings.impl.CertificateBasedTokenBinder;
+import org.wso2.carbon.identity.oauth2.token.bindings.impl.ClientRequestTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.CookieBasedTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.DeviceFlowTokenBinder;
 import org.wso2.carbon.identity.oauth2.token.bindings.impl.SSOSessionBasedTokenBinder;
+import org.wso2.carbon.identity.oauth2.token.handlers.claims.JWTAccessTokenClaimProvider;
+import org.wso2.carbon.identity.oauth2.token.handlers.response.AccessTokenResponseHandler;
+import org.wso2.carbon.identity.oauth2.token.handlers.response.FederatedTokenResponseHandler;
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
+import org.wso2.carbon.identity.oauth2.validators.scope.RoleBasedScopeIssuer;
 import org.wso2.carbon.identity.oauth2.validators.scope.ScopeValidator;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.ScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.M2MScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.NoPolicyScopeValidationHandler;
+import org.wso2.carbon.identity.oauth2.validators.validationhandler.impl.RoleBasedScopeValidationHandler;
 import org.wso2.carbon.identity.openidconnect.OpenIDConnectClaimFilter;
 import org.wso2.carbon.identity.openidconnect.OpenIDConnectClaimFilterImpl;
 import org.wso2.carbon.identity.openidconnect.dao.ScopeClaimMappingDAO;
 import org.wso2.carbon.identity.openidconnect.dao.ScopeClaimMappingDAOImpl;
 import org.wso2.carbon.identity.organization.management.role.management.service.RoleManager;
+import org.wso2.carbon.identity.organization.management.service.OrganizationManagementInitialize;
+import org.wso2.carbon.identity.organization.management.service.OrganizationManager;
 import org.wso2.carbon.identity.organization.management.service.OrganizationUserResidentResolverService;
+import org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService;
 import org.wso2.carbon.identity.user.store.configuration.listener.UserStoreConfigListener;
 import org.wso2.carbon.idp.mgt.IdpManager;
 import org.wso2.carbon.registry.core.service.RegistryService;
 import org.wso2.carbon.stratos.common.listeners.TenantMgtListener;
+import org.wso2.carbon.user.core.service.RealmService;
 import org.wso2.carbon.utils.CarbonUtils;
+import org.wso2.carbon.utils.ConfigurationContextService;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -87,8 +118,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import javax.xml.namespace.QName;
 import javax.xml.stream.XMLInputFactory;
@@ -101,6 +137,7 @@ import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.checkAudienceEnabl
 import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.checkConsentedTokenColumnAvailable;
 import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.checkIDPIdColumnAvailable;
 import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.getJWTRenewWithoutRevokeAllowedGrantTypes;
+import static org.wso2.carbon.identity.oauth2.util.OAuth2Util.isAccessTokenExtendedTableExist;
 
 /**
  * OAuth 2 OSGi service component.
@@ -119,6 +156,12 @@ public class OAuth2ServiceComponent {
     private static final String DESCRIPTION = "description";
     private static final String PERMISSION = "Permission";
     private static final String CLAIM = "Claim";
+    private static final String RESOURCE_ACCESS_CONTROL = "ResourceAccessControl";
+    private static final String RESOURCE = "Resource";
+    private static final String CONTEXT = "context";
+    private static final String HTTP_METHOD = "http-method";
+    private static final String SECURED = "secured";
+    private static final String SCOPES = "Scopes";
     private BundleContext bundleContext;
 
     @Reference(
@@ -134,6 +177,33 @@ public class OAuth2ServiceComponent {
         OAuth2ServiceComponentHolder.setAuthenticationMethodNameTranslator(authenticationMethodNameTranslator);
     }
 
+    @Reference(
+            name = "oauth.authorization.request.builder.service",
+            service = OAuthAuthorizationRequestBuilder.class,
+            cardinality = ReferenceCardinality.MULTIPLE,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "removeAuthorizationRequestBuilderService"
+    )
+    protected void addAuthorizationRequestBuilderService(
+            OAuthAuthorizationRequestBuilder oAuthAuthorizationRequestBuilder) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding the oauth authorization request builder service : "
+                    + oAuthAuthorizationRequestBuilder.getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().addAuthorizationRequestBuilder(oAuthAuthorizationRequestBuilder);
+    }
+
+    protected void removeAuthorizationRequestBuilderService(
+            OAuthAuthorizationRequestBuilder oAuthAuthorizationRequestBuilder) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing the oauth authorization request builder service : "
+                    + oAuthAuthorizationRequestBuilder.getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().removeAuthorizationRequestBuilder(oAuthAuthorizationRequestBuilder);
+    }
+
     protected void unsetAuthenticationMethodNameTranslator(
             AuthenticationMethodNameTranslator authenticationMethodNameTranslator) {
 
@@ -146,6 +216,12 @@ public class OAuth2ServiceComponent {
     protected void activate(ComponentContext context) {
 
         try {
+            // Check if server compliant with the client ID tenant unification.
+            if (!OAuth2Util.isCompliantWithClientIDTenantUnification()) {
+                throw new RuntimeException("The unique key constraint in the IDN_OAUTH_CONSUMER_APPS table is not " +
+                        "compatible with the server configs on tenant qualified URLs and/ or tenanted sessions.");
+            }
+
             if (OAuth2ServiceComponentHolder.getInstance().getScopeClaimMappingDAO() == null) {
                 OAuth2ServiceComponentHolder.getInstance()
                         .setScopeClaimMappingDAO(new ScopeClaimMappingDAOImpl());
@@ -200,6 +276,18 @@ public class OAuth2ServiceComponent {
                 bundleContext.registerService(TokenBinderInfo.class.getName(), deviceFlowTokenBinder, null);
             }
 
+            /* Certificate based token binder will be enabled only if certificate binding is not being performed in the
+               MTLS authenticator. By default, the certificate binding type will be enabled. */
+            if (Boolean.parseBoolean(IdentityUtil
+                    .getProperty(OAuthConstants.ENABLE_TLS_CERT_BOUND_ACCESS_TOKENS_VIA_BINDING_TYPE))) {
+                CertificateBasedTokenBinder certificateBasedTokenBinder = new CertificateBasedTokenBinder();
+                bundleContext.registerService(TokenBinderInfo.class.getName(), certificateBasedTokenBinder, null);
+            }
+
+            // Client instance based access token binder.
+            ClientRequestTokenBinder clientRequestTokenBinder = new ClientRequestTokenBinder();
+            bundleContext.registerService(TokenBinderInfo.class.getName(), clientRequestTokenBinder, null);
+
             bundleContext.registerService(ResponseTypeRequestValidator.class.getName(),
                     new DeviceFlowResponseTypeRequestValidator(), null);
 
@@ -219,6 +307,12 @@ public class OAuth2ServiceComponent {
             // Read and store the allowed grant types for JWT renew without revoke in OAuth2ServiceComponentHolder.
             OAuth2ServiceComponentHolder.setJwtRenewWithoutRevokeAllowedGrantTypes(
                     getJWTRenewWithoutRevokeAllowedGrantTypes());
+
+            OAuth2ServiceComponentHolder.
+                    setResponseModeProviders(OAuthServerConfiguration.getInstance().getSupportedResponseModes());
+            OAuth2ServiceComponentHolder.
+                    setDefaultResponseModeProvider(OAuthServerConfiguration.getInstance()
+                            .getDefaultResponseModeProvider());
 
             ServiceRegistration tenantMgtListenerSR = bundleContext.registerService(TenantMgtListener.class.getName(),
                     new OAuthTenantMgtListenerImpl(), null);
@@ -281,11 +375,20 @@ public class OAuth2ServiceComponent {
             OAuth2ScopeService oAuth2ScopeService = new OAuth2ScopeService();
             // Registering OAuth2ScopeService as a OSGIService
             bundleContext.registerService(OAuth2ScopeService.class.getName(), oAuth2ScopeService, null);
-            // Registering OAuth2ScopeService under ScopeService interface as the default service.
+            // Registering OAuth2ScopeService under ScopeService interface.
             bundleContext.registerService(ScopeMetadataService.class, oAuth2ScopeService, null);
+
+            // Registering API Resource based scope metadata service under ScopeService interface.
+            bundleContext.registerService(ScopeMetadataService.class, new APIResourceBasedScopeMetadataService(), null);
+
+            bundleContext.registerService(ScopeValidationHandler.class, new RoleBasedScopeValidationHandler(), null);
+            bundleContext.registerService(ScopeValidationHandler.class, new NoPolicyScopeValidationHandler(), null);
+            bundleContext.registerService(ScopeValidationHandler.class, new M2MScopeValidationHandler(), null);
+            bundleContext.registerService(AccessTokenResponseHandler.class, new FederatedTokenResponseHandler(),
+                    null);
+
             // Note : DO NOT add any activation related code below this point,
             // to make sure the server doesn't start up if any activation failures occur
-
         } catch (Throwable e) {
             String errMsg = "Error while activating OAuth2ServiceComponent.";
             log.error(errMsg, e);
@@ -316,6 +419,12 @@ public class OAuth2ServiceComponent {
             OAuth2ServiceComponentHolder.setIDPIdColumnEnabled(false);
         }
 
+        if (isAccessTokenExtendedTableExist()) {
+            log.debug("IDN_OAUTH2_ACCESS_TOKEN_EXTENDED table is available Setting " +
+                    "isAccessTokenExtendedTableExist to true.");
+            OAuth2ServiceComponentHolder.setTokenExtendedTableExist(true);
+        }
+
         boolean isConsentedTokenColumnAvailable = checkConsentedTokenColumnAvailable();
         OAuth2ServiceComponentHolder.setConsentedTokenColumnEnabled(isConsentedTokenColumnAvailable);
         if (log.isDebugEnabled()) {
@@ -326,6 +435,16 @@ public class OAuth2ServiceComponent {
                 log.debug("CONSENTED_TOKEN column is not available in IDN_OAUTH2_ACCESS_TOKEN table. Hence " +
                         "setting consentedColumnAvailable to false.");
             }
+        }
+        if (OAuthServerConfiguration.getInstance().isGlobalRbacScopeIssuerEnabled()) {
+            bundleContext.registerService(ScopeValidator.class, new RoleBasedScopeIssuer(), null);
+        }
+        boolean restrictUnassignedScopes = Boolean.parseBoolean(System.getProperty(
+                OAuthConstants.RESTRICT_UNASSIGNED_SCOPES));
+        OAuth2ServiceComponentHolder.setRestrictUnassignedScopes(restrictUnassignedScopes);
+        if (OAuthServerConfiguration.getInstance().isUseLegacyScopesAsAliasForNewScopesEnabled()
+                || OAuthServerConfiguration.getInstance().isUseLegacyPermissionAccessForUserBasedAuth()) {
+            initializeLegacyScopeToNewScopeMappings();
         }
     }
 
@@ -547,6 +666,29 @@ public class OAuth2ServiceComponent {
     }
 
     @Reference(
+            name = "scope.validator.handler",
+            service = ScopeValidationHandler.class,
+            cardinality = ReferenceCardinality.MULTIPLE,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "removeScopeValidationHandler"
+    )
+    protected void addScopeValidationHandler(ScopeValidationHandler scopeValidationHandler) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding the Scope validation handler Service : " + scopeValidationHandler.getName());
+        }
+        OAuthComponentServiceHolder.getInstance().addScopeValidationHandler(scopeValidationHandler);
+    }
+
+    protected void removeScopeValidationHandler(ScopeValidationHandler scopeValidationHandler) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing the Scope validator Service : " + scopeValidationHandler.getName());
+        }
+        OAuthComponentServiceHolder.getInstance().removeScopeValidationHandler(scopeValidationHandler);
+    }
+
+    @Reference(
             name = "IdentityProviderManager",
             service = org.wso2.carbon.idp.mgt.IdpManager.class,
             cardinality = ReferenceCardinality.MANDATORY,
@@ -641,6 +783,216 @@ public class OAuth2ServiceComponent {
             log.debug("Unset organization user resident resolver service.");
         }
         OAuth2ServiceComponentHolder.setOrganizationUserResidentResolverService(null);
+    }
+
+    /**
+     * Sets the token provider.
+     *
+     * @param tokenProvider TokenProvider
+     */
+    @Reference(
+            name = "token.provider",
+            service = TokenProvider.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetTokenProvider"
+    )
+    protected void setTokenProvider(TokenProvider tokenProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Setting token provider.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setTokenProvider(tokenProvider);
+    }
+
+    /**
+     * Unsets the token provider.
+     *
+     * @param tokenProvider TokenProvider
+     */
+    protected void unsetTokenProvider(TokenProvider tokenProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Unset token provider.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setTokenProvider(null);
+    }
+
+    /**
+     * Sets the refresh token grant processor.
+     *
+     * @param refreshTokenGrantProcessor RefreshTokenGrantProcessor
+     */
+    @Reference(
+            name = "refreshtoken.grant.processor",
+            service = RefreshTokenGrantProcessor.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetRefreshTokenGrantProcessor"
+    )
+    protected void setRefreshTokenGrantProcessor(RefreshTokenGrantProcessor refreshTokenGrantProcessor) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Setting refresh token grant processor.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRefreshTokenGrantProcessor(refreshTokenGrantProcessor);
+    }
+
+    /**
+     * Unsets the refresh token grant processor.
+     *
+     * @param refreshTokenGrantProcessor RefreshTokenGrantProcessor
+     */
+    protected void unsetRefreshTokenGrantProcessor(RefreshTokenGrantProcessor refreshTokenGrantProcessor) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Unset refresh token grant processor.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRefreshTokenGrantProcessor(null);
+    }
+
+    /**
+     * Sets the access token grant processor.
+     *
+     * @param accessTokenDAO AccessTokenDAO
+     */
+    @Reference(
+            name = "access.token.dao.service",
+            service = AccessTokenDAO.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetAccessTokenDAOService"
+    )
+    protected void setAccessTokenDAOService(AccessTokenDAO accessTokenDAO) {
+
+        if (log.isDebugEnabled()) {
+            log.debug(String.format("Adding the Access Token DAO Service : %s", accessTokenDAO.getClass().getName()));
+        }
+        OAuthComponentServiceHolder.getInstance().setAccessTokenDAOService(accessTokenDAO);
+    }
+
+    /**
+     * Unsets the access token grant processor.
+     *
+     * @param accessTokenDAO   AccessTokenDAO
+     */
+    protected void unsetAccessTokenDAOService(AccessTokenDAO accessTokenDAO) {
+
+        if (log.isDebugEnabled()) {
+            log.debug(String.format("Removing the Access Token DAO Service : %s", accessTokenDAO.getClass().getName()));
+        }
+        OAuthComponentServiceHolder.getInstance().setAccessTokenDAOService(null);
+    }
+
+    /**
+     * Sets the access token grant processor.
+     *
+     * @param tokenMgtDAOService TokenManagementDAO
+     */
+    @Reference(
+            name = "token.management.dao.service",
+            service = TokenManagementDAO.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetTokenMgtDAOService"
+    )
+    protected void setTokenMgtDAOService(TokenManagementDAO tokenMgtDAOService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug(String.format("Adding the Token Mgt DAO Service : %s", tokenMgtDAOService.getClass().getName()));
+        }
+        OAuthComponentServiceHolder.getInstance().setTokenManagementDAOService(tokenMgtDAOService);
+    }
+
+    /**
+     * Unsets the access token grant processor.
+     *
+     * @param tokenManagementDAO TokenManagementDAO
+     */
+    protected void unsetTokenMgtDAOService(TokenManagementDAO tokenManagementDAO) {
+
+        if (log.isDebugEnabled()) {
+            log.debug(String.format("Removing the Token Mgt DAO Service : %s",
+                    tokenManagementDAO.getClass().getName()));
+        }
+        OAuthComponentServiceHolder.getInstance().setTokenManagementDAOService(null);
+    }
+
+
+    /**
+     * Sets the access token grant processor.
+     *
+     * @param oAuth2RevocationProcessor OAuth2RevocationProcessor
+     */
+    @Reference(
+            name = "oauth2.revocation.processor",
+            service = OAuth2RevocationProcessor.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetOAuth2RevocationProcessor"
+    )
+    protected void setOAuth2RevocationProcessor(OAuth2RevocationProcessor oAuth2RevocationProcessor) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Setting Oauth2 revocation processor.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRevocationProcessor(oAuth2RevocationProcessor);
+    }
+
+    /**
+     * Unsets the access token grant processor.
+     *
+     * @param oAuth2RevocationProcessor OAuth2RevocationProcessor
+     */
+    protected void unsetOAuth2RevocationProcessor(OAuth2RevocationProcessor oAuth2RevocationProcessor) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Unset Oauth2 revocation processor.");
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRevocationProcessor(null);
+    }
+
+    @Reference(
+            name = "organization.mgt.initialize.service",
+            service = OrganizationManagementInitialize.class,
+            cardinality = ReferenceCardinality.OPTIONAL,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetOrganizationManagementEnablingService"
+    )
+    protected void setOrganizationManagementEnablingService(
+            OrganizationManagementInitialize organizationManagementInitializeService) {
+
+        OAuth2ServiceComponentHolder.getInstance()
+                .setOrganizationManagementEnable(organizationManagementInitializeService);
+    }
+
+    protected void unsetOrganizationManagementEnablingService(
+            OrganizationManagementInitialize organizationManagementInitializeInstance) {
+
+        OAuth2ServiceComponentHolder.getInstance().setOrganizationManagementEnable(null);
+    }
+
+    @Reference(
+            name = "organization.service",
+            service = OrganizationManager.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetOrganizationManager"
+    )
+    protected void setOrganizationManager(OrganizationManager organizationManager) {
+
+        OAuth2ServiceComponentHolder.getInstance().setOrganizationManager(organizationManager);
+        if (log.isDebugEnabled()) {
+            log.debug("Set organization management service.");
+        }
+    }
+
+    protected void unsetOrganizationManager(OrganizationManager organizationManager) {
+
+        OAuth2ServiceComponentHolder.getInstance().setOrganizationManager(null);
+        if (log.isDebugEnabled()) {
+            log.debug("Unset organization management service.");
+        }
     }
 
     private static void loadScopeConfigFile() {
@@ -787,6 +1139,168 @@ public class OAuth2ServiceComponent {
         return permissions;
     }
 
+    private static void initializeLegacyScopeToNewScopeMappings() {
+
+        Map<ResourceAccessControlKey, List<String>> legacyResourceScopes = loadLegacyResourceScopes();
+        Map<ResourceAccessControlKey, List<String>> newResourceScopes = loadNewResourceScopes();
+        Map<String, Set<String>> mappedScopes = new HashMap<>();
+        Map<String, Set<String>> mappedMultipleScopes = new HashMap<>();
+
+        for (Map.Entry<ResourceAccessControlKey, List<String>> entry : legacyResourceScopes.entrySet()) {
+            ResourceAccessControlKey resourceAccessControlKey = entry.getKey();
+            List<String> legacyScopes = entry.getValue();
+            List<String> newScopes = newResourceScopes.get(resourceAccessControlKey);
+            if (CollectionUtils.isEmpty(legacyScopes) || CollectionUtils.isEmpty(newScopes)) {
+                continue;
+            }
+            if (legacyScopes.size() == 1) {
+                // This will add the scope mappings related to resources protected by single legacy scope.
+                String legacyScope = legacyScopes.get(0);
+                if (newScopes.contains(legacyScope)) {
+                    continue;
+                }
+                if (mappedScopes.get(legacyScope) != null) {
+                    mappedScopes.get(legacyScope).addAll(newScopes);
+                } else {
+                    mappedScopes.put(legacyScope, new HashSet<>(newScopes));
+                }
+            } else {
+                // This will add the scope mappings related to resources protected by multiple legacy scopes.
+                String legacyScopeKey = legacyScopes.stream().sorted().collect(Collectors.joining(","));
+                String newScopesString = newScopes.stream().sorted().collect(Collectors.joining(","));
+                if (legacyScopeKey.equals(newScopesString)) {
+                    continue;
+                }
+                if (mappedMultipleScopes.get(legacyScopeKey) != null) {
+                    mappedMultipleScopes.get(legacyScopeKey).addAll(newScopes);
+                } else {
+                    mappedMultipleScopes.put(legacyScopeKey, new HashSet<>(newScopes));
+                }
+            }
+        }
+        OAuth2ServiceComponentHolder.getInstance().setLegacyScopesToNewScopesMap(mappedScopes);
+        OAuth2ServiceComponentHolder.getInstance().setLegacyMultipleScopesToNewScopesMap(mappedMultipleScopes);
+    }
+
+    /**
+     * Load legacy resource scopes from identity.xml.
+     *
+     * @return Map of resource access control key and scopes.
+     */
+    private static Map<ResourceAccessControlKey, List<String>> loadLegacyResourceScopes() {
+
+        Map<ResourceAccessControlKey, List<String>> resourceAccessControlMap = new HashMap<>();
+        String configDirPath = CarbonUtils.getCarbonConfigDirPath();
+        String filePath = Paths.get(configDirPath, IDENTITY_PATH, IdentityCoreConstants.IDENTITY_CONFIG).toString();
+
+        XMLStreamReader parser = null;
+        try (InputStream stream = new FileInputStream(filePath)) {
+            parser = XMLInputFactory.newInstance().createXMLStreamReader(stream);
+            StAXOMBuilder builder = new StAXOMBuilder(parser);
+            OMElement documentElement = builder.getDocumentElement();
+            Iterator iterator = documentElement.getChildElements();
+            while (iterator.hasNext()) {
+                OMElement omElement = (OMElement) iterator.next();
+                if (RESOURCE_ACCESS_CONTROL.equals(omElement.getLocalName())) {
+                    Iterator resourceIterator = omElement.getChildElements();
+                    while (resourceIterator.hasNext()) {
+                        OMElement resourceElement = (OMElement) resourceIterator.next();
+                        if (RESOURCE.equals(resourceElement.getLocalName())) {
+                            processResourceElement(resourceElement, resourceAccessControlMap);
+                        }
+                    }
+                }
+            }
+        } catch (XMLStreamException e) {
+            log.warn("Error while streaming identity config.", e);
+        } catch (IOException e) {
+            log.warn("Error while loading identity config.", e);
+        } finally {
+            try {
+                if (parser != null) {
+                    parser.close();
+                }
+            } catch (XMLStreamException e) {
+                log.error("Error while closing XML stream", e);
+            }
+        }
+
+        return resourceAccessControlMap;
+    }
+
+    /**
+     * Load new resource scopes from resource-access-control-v2.xml.
+     *
+     * @return Map of resource access control key and scopes.
+     */
+    private static Map<ResourceAccessControlKey, List<String>> loadNewResourceScopes() {
+
+        Map<ResourceAccessControlKey, List<String>> resourceAccessControlMap = new HashMap<>();
+        String configDirPath = CarbonUtils.getCarbonConfigDirPath();
+        String filePath = Paths.get(configDirPath, IDENTITY_PATH,
+                OAuthConstants.RESOURCE_ACCESS_CONTROL_V2_CONFIG_PATH).toString();
+
+        XMLStreamReader parser = null;
+        try (InputStream stream = new FileInputStream(filePath)) {
+            parser = XMLInputFactory.newInstance().createXMLStreamReader(stream);
+            StAXOMBuilder builder = new StAXOMBuilder(parser);
+            OMElement documentElement = builder.getDocumentElement();
+            Iterator iterator = documentElement.getChildElements();
+            while (iterator.hasNext()) {
+                OMElement resourceElement = (OMElement) iterator.next();
+                if (RESOURCE.equals(resourceElement.getLocalName())) {
+                    processResourceElement(resourceElement, resourceAccessControlMap);
+                }
+            }
+        } catch (XMLStreamException e) {
+            log.warn("Error while streaming resource access control v2 config.", e);
+        } catch (IOException e) {
+            log.warn("Error while loading resource access control v2 config.", e);
+        } finally {
+            try {
+                if (parser != null) {
+                    parser.close();
+                }
+            } catch (XMLStreamException e) {
+                log.error("Error while closing XML stream", e);
+            }
+        }
+
+        return resourceAccessControlMap;
+    }
+
+    /**
+     * Process resource element and populate the map.
+     *
+     * @param resourceElement  Resource element.
+     * @param resourceScopeMap Resource scope map.
+     */
+    private static void processResourceElement(OMElement resourceElement,
+                                               Map<ResourceAccessControlKey, List<String>> resourceScopeMap) {
+
+        String context = resourceElement.getAttributeValue(new QName(CONTEXT));
+        String httpMethod = resourceElement.getAttributeValue(new QName(HTTP_METHOD));
+        boolean secured = Boolean.parseBoolean(resourceElement.getAttributeValue(new QName(SECURED)));
+
+        if (secured) {
+            ResourceAccessControlKey key = new ResourceAccessControlKey();
+            key.setEndpointRegex(context);
+            key.setHttpMethod(httpMethod);
+
+            List<String> scopes = new ArrayList<>();
+            Iterator childIterator = resourceElement.getChildElements();
+            while (childIterator.hasNext()) {
+                OMElement childElement = (OMElement) childIterator.next();
+                if (SCOPES.equals(childElement.getLocalName())) {
+                    scopes.add(childElement.getText());
+                }
+            }
+            if (CollectionUtils.isNotEmpty(scopes)) {
+                resourceScopeMap.put(key, scopes);
+            }
+        }
+    }
+
     @Reference(
             name = "org.wso2.carbon.identity.event.services.IdentityEventService",
             service = IdentityEventService.class,
@@ -808,5 +1322,227 @@ public class OAuth2ServiceComponent {
             log.debug("IdentityEventService unset in OAuth2ServiceComponent bundle");
         }
         OAuth2ServiceComponentHolder.setIdentityEventService(null);
+    }
+
+    @Reference(
+            name = "consent.server.configs.mgt.service",
+            service = ConsentServerConfigsManagementService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetConsentServerConfigsManagementService"
+    )
+
+    /**
+     * This method is used to set the Consent Server Configs Management Service.
+     *
+     * @param consentServerConfigsManagementService The Consent Server Configs Management Service which needs to be set.
+     */
+    protected void setConsentServerConfigsManagementService(ConsentServerConfigsManagementService
+                                                                        consentServerConfigsManagementService) {
+
+        OAuth2ServiceComponentHolder.setConsentServerConfigsManagementService(consentServerConfigsManagementService);
+        log.debug("Setting the Consent Server Management Configs.");
+    }
+
+    /**
+     * This method is used to unset the Consent Server Configs Management Service.
+     *
+     * @param consentServerConfigsManagementService The Consent Server Configs Management Service which needs to unset.
+     */
+    protected void unsetConsentServerConfigsManagementService(ConsentServerConfigsManagementService
+                                                     consentServerConfigsManagementService) {
+
+        OAuth2ServiceComponentHolder.setConsentServerConfigsManagementService(null);
+        log.debug("Unsetting the Consent Server Configs Management.");
+    }
+
+    @Reference(
+            name = "configuration.context.service",
+            service = ConfigurationContextService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetConfigurationContextService"
+    )
+    protected void setConfigurationContextService(ConfigurationContextService configurationContextService) {
+
+        OAuth2ServiceComponentHolder.getInstance().setConfigurationContextService(configurationContextService);
+        log.debug("ConfigurationContextService Instance was set.");
+    }
+
+    protected void unsetConfigurationContextService(ConfigurationContextService configurationContextService) {
+
+        OAuth2ServiceComponentHolder.getInstance().setConfigurationContextService(null);
+        log.debug("ConfigurationContextService Instance was unset.");
+    }
+
+    @Reference(
+            name = "JWTAccessTokenClaimProvider",
+            service = JWTAccessTokenClaimProvider.class,
+            cardinality = ReferenceCardinality.MULTIPLE,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetJWTAccessTokenClaimProvider"
+    )
+    protected void setJWTAccessTokenClaimProvider(JWTAccessTokenClaimProvider claimProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding JWT Access Token ClaimProvider: " + claimProvider.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().addJWTAccessTokenClaimProvider(claimProvider);
+    }
+
+    protected void unsetJWTAccessTokenClaimProvider(JWTAccessTokenClaimProvider claimProvider) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing JWT Access Token ClaimProvider: " + claimProvider.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().removeJWTAccessTokenClaimProvider(claimProvider);
+    }
+
+    @Reference(
+            name = "saml.sso.service.provider.manager",
+            service = SAMLSSOServiceProviderManager.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetSAMLSSOServiceProviderManager")
+    protected void setSAMLSSOServiceProviderManager(SAMLSSOServiceProviderManager samlSSOServiceProviderManager) {
+
+        OAuth2ServiceComponentHolder.getInstance().setSamlSSOServiceProviderManager(samlSSOServiceProviderManager);
+        if (log.isDebugEnabled()) {
+            log.debug("SAMLSSOServiceProviderManager set in to bundle");
+        }
+    }
+
+    protected void unsetSAMLSSOServiceProviderManager(SAMLSSOServiceProviderManager samlSSOServiceProviderManager) {
+
+        OAuth2ServiceComponentHolder.getInstance().setSamlSSOServiceProviderManager(null);
+        if (log.isDebugEnabled()) {
+            log.debug("SAMLSSOServiceProviderManager unset in to bundle");
+        }
+    }
+
+    @Reference(
+            name = "identity.application.authentication.framework",
+            service = ApplicationAuthenticationService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetApplicationAuthenticationService"
+    )
+    protected void setApplicationAuthenticationService(
+            ApplicationAuthenticationService applicationAuthenticationService) {
+        /* reference ApplicationAuthenticationService service to guarantee that this component will wait until
+        authentication framework is started */
+    }
+
+    protected void unsetApplicationAuthenticationService(
+            ApplicationAuthenticationService applicationAuthenticationService) {
+        /* reference ApplicationAuthenticationService service to guarantee that this component will wait until
+        authentication framework is started */
+    }
+
+    /**
+     * Set realm service implementation.
+     *
+     * @param realmService RealmService
+     */
+    @Reference(
+            name = "user.realmservice.default",
+            service = RealmService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetRealmService"
+    )
+    protected void setRealmService(RealmService realmService) {
+
+        OAuth2ServiceComponentHolder.getInstance().setRealmService(realmService);
+    }
+
+    /**
+     * Unset realm service implementation.
+     *
+     * @param realmService RealmService
+     */
+    protected void unsetRealmService(RealmService realmService) {
+
+        OAuth2ServiceComponentHolder.getInstance().setRealmService(null);
+    }
+
+    @Reference(
+            name = "identity.authorized.api.management.component",
+            service = AuthorizedAPIManagementService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetAuthorizedAPIManagementService"
+    )
+    protected void setAuthorizedAPIManagementService(AuthorizedAPIManagementService authorizedAPIManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding Authorized API Management Service: " + authorizedAPIManagementService.getClass()
+                    .getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance()
+                .setAuthorizedAPIManagementService(authorizedAPIManagementService);
+    }
+
+    protected void unsetAuthorizedAPIManagementService(AuthorizedAPIManagementService authorizedAPIManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing Authorized API Management Service: " + authorizedAPIManagementService.getClass()
+                    .getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setAuthorizedAPIManagementService(null);
+    }
+
+    @Reference(
+            name = "api.resource.mgt.service.component",
+            service = APIResourceManager.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetAPIResourceManagerService"
+    )
+    protected void setAPIResourceManagerService(APIResourceManager apiResourceManager) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding API Resource Manager: " + apiResourceManager.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setApiResourceManager(apiResourceManager);
+    }
+    protected void unsetAPIResourceManagerService(APIResourceManager apiResourceManager) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing API Resource Manager: " + apiResourceManager.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setApiResourceManager(null);
+    }
+
+    /**
+     * Set role management service V2 implementation.
+     *
+     * @param roleManagementService RoleManagementServiceV2.
+     */
+    @Reference(
+            name = "org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService",
+            service = org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetRoleManagementServiceV2")
+    protected void setRoleManagementServiceV2(RoleManagementService roleManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Adding Role Management  Service V2: " + roleManagementService.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRoleManagementServiceV2(roleManagementService);
+    }
+
+    /**
+     * Unset role management service V2 implementation.
+     *
+     * @param roleManagementService RoleManagementServiceV2
+     */
+    protected void unsetRoleManagementServiceV2(RoleManagementService roleManagementService) {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Removing Role Management  Service V2: " + roleManagementService.getClass().getName());
+        }
+        OAuth2ServiceComponentHolder.getInstance().setRoleManagementServiceV2(null);
     }
 }

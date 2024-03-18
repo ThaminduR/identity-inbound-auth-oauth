@@ -38,6 +38,10 @@ public final class IntrospectionResponse {
     public static final String USERNAME = "username";
 
     // OPTIONAL
+    // organization for which the token was issued
+    public static final String ORG_ID = "org_id";
+
+    // OPTIONAL
     // token type
     public static final String TOKEN_TYPE = "token_type";
 
@@ -79,6 +83,7 @@ public final class IntrospectionResponse {
     // OPTIONAL
     // Access token binding reference.
     public static final String BINDING_REFERENCE = "binding_ref";
+    public static final String CNF = "cnf";
 
     public static final String AUT = "aut";
 

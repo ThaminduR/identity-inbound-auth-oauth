@@ -20,8 +20,10 @@ package org.wso2.carbon.identity.oauth.endpoint.introspection;
 import org.apache.commons.lang.StringUtils;
 import org.apache.oltu.oauth2.common.utils.JSONUtils;
 import org.json.JSONException;
+import org.wso2.carbon.identity.oauth.common.OAuthConstants;
 import org.wso2.carbon.identity.oauth.config.OAuthServerConfiguration;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -123,6 +125,18 @@ public class IntrospectionResponseBuilder {
 
         if (StringUtils.isNotBlank(username)) {
             parameters.put(IntrospectionResponse.USERNAME, username);
+        }
+        return this;
+    }
+
+    /**
+     * @param orgId Organization ID
+     * @return IntrospectionResponseBuilder
+     */
+    public IntrospectionResponseBuilder setOrgId(String orgId) {
+
+        if (StringUtils.isNotBlank(orgId)) {
+            parameters.put(IntrospectionResponse.ORG_ID, orgId);
         }
         return this;
     }
@@ -238,6 +252,21 @@ public class IntrospectionResponseBuilder {
 
         if (StringUtils.isNotBlank(bindingReference)) {
             parameters.put(IntrospectionResponse.BINDING_REFERENCE, bindingReference);
+        }
+        return this;
+    }
+
+    /**
+     * Set cnf value to be bound to the access token.
+     *
+     * @param cnfBindingValue Thumbprint of the TLS certificate passed in the request.
+     * @return IntrospectionResponseBuilder.
+     */
+    public IntrospectionResponseBuilder setCnfBindingValue(String cnfBindingValue) {
+
+        if (StringUtils.isNotBlank(cnfBindingValue)) {
+            parameters.put(IntrospectionResponse.CNF,
+                    Collections.singletonMap(OAuthConstants.X5T_S256, cnfBindingValue));
         }
         return this;
     }

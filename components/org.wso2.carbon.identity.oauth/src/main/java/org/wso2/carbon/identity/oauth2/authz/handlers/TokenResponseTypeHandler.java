@@ -28,6 +28,7 @@ import org.wso2.carbon.identity.application.common.model.Claim;
 import org.wso2.carbon.identity.application.common.model.ClaimMapping;
 import org.wso2.carbon.identity.base.IdentityConstants;
 import org.wso2.carbon.identity.base.IdentityException;
+import org.wso2.carbon.identity.central.log.mgt.utils.LoggerUtils;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.oauth.cache.AuthorizationGrantCache;
 import org.wso2.carbon.identity.oauth.cache.AuthorizationGrantCacheEntry;
@@ -140,8 +141,11 @@ public class TokenResponseTypeHandler extends AbstractResponseTypeHandler {
         synchronized ((consumerKey + ":" + authorizedUserId + ":" + scope).intern()) {
 
             AccessTokenDO existingAccessTokenDO = null;
-            // check if valid access token exists in cache
-            if (isHashDisabled && cacheEnabled) {
+            /*
+             * Check if valid access token exists in cache. If no token persistence, the token will be not be cached
+             * against a cache key with userId, scope, client.
+             */
+            if (isHashDisabled && cacheEnabled && OAuth2Util.isTokenPersistenceEnabled()) {
                 existingAccessTokenDO = (AccessTokenDO) OAuthCache.getInstance().getValueFromCache(cacheKey);
                 if (existingAccessTokenDO != null) {
                     if (log.isDebugEnabled()) {
@@ -242,8 +246,11 @@ public class TokenResponseTypeHandler extends AbstractResponseTypeHandler {
                                     log.debug("Infinite lifetime Access Token found in cache");
                                 }
                             }
-
-                            if (cacheEnabled) {
+                            /*
+                             * If no token persistence, the token will be not be cached against a cache key with userId,
+                             * scope, client.
+                             */
+                            if (cacheEnabled && OAuth2Util.isTokenPersistenceEnabled()) {
                                 OAuthCache.getInstance().addToCache(cacheKey, existingAccessTokenDO);
                                 if (log.isDebugEnabled()) {
                                     log.debug("Access Token was added to cache for cache key : " + cacheKey
@@ -408,8 +415,10 @@ public class TokenResponseTypeHandler extends AbstractResponseTypeHandler {
                     refreshToken = newAccessTokenDO.getRefreshToken();
                 }
             } catch (IdentityException e) {
+                String maskedToken = LoggerUtils.isLogMaskingEnable ? LoggerUtils.getMaskedContent(accessToken) :
+                        accessToken;
                 throw new IdentityOAuth2Exception(
-                        "Error occurred while storing new access token : " + accessToken, e);
+                        "Error occurred while storing new access token : " + maskedToken, e);
             }
             tokenDO = newAccessTokenDO;
             if (log.isDebugEnabled()) {
@@ -426,12 +435,21 @@ public class TokenResponseTypeHandler extends AbstractResponseTypeHandler {
 
             // Add the access token to the cache, if cacheEnabled and the hashing oauth key feature turn on.
             if (isHashDisabled && cacheEnabled) {
-                OAuthCache.getInstance().addToCache(cacheKey, newAccessTokenDO);
+                /*
+                 * If no token persistence, the token will be not be cached against a cache key with userId, scope,
+                 * client. But, token will be cached and managed as an AccessTokenDO against the token identifier.
+                 */
+                if (OAuth2Util.isTokenPersistenceEnabled()) {
+                    OAuthCache.getInstance().addToCache(cacheKey, newAccessTokenDO);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Access Token was added to OAuthCache for cache key : "
+                                + cacheKey.getCacheKeyString());
+                    }
+                }
                 // Adding AccessTokenDO to improve validation performance
                 OAuthCacheKey accessTokenCacheKey = new OAuthCacheKey(accessToken);
                 OAuthCache.getInstance().addToCache(accessTokenCacheKey, newAccessTokenDO);
                 if (log.isDebugEnabled()) {
-                    log.debug("Access Token was added to OAuthCache for cache key : " + cacheKey.getCacheKeyString());
                     log.debug("Access Token was added to OAuthCache for cache key : " + accessTokenCacheKey
                             .getCacheKeyString());
                 }

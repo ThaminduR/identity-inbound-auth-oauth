@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2013, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2013-2024, WSO2 LLC. (http://www.wso2.com).
  *
- * WSO2 Inc. licenses this file to you under the Apache License,
+ * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
  * You may obtain a copy of the License at
@@ -11,7 +11,7 @@
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied. See the License for the
+ * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -30,11 +30,18 @@ import org.wso2.carbon.context.PrivilegedCarbonContext;
 import org.wso2.carbon.identity.application.authentication.framework.exception.UserIdNotFoundException;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
 import org.wso2.carbon.identity.application.common.IdentityApplicationManagementException;
+import org.wso2.carbon.identity.application.common.model.IdentityProvider;
+import org.wso2.carbon.identity.application.common.model.ServiceProvider;
 import org.wso2.carbon.identity.application.common.model.User;
+import org.wso2.carbon.identity.application.mgt.ApplicationConstants;
+import org.wso2.carbon.identity.application.mgt.ApplicationManagementService;
+import org.wso2.carbon.identity.base.IdentityConstants;
+import org.wso2.carbon.identity.central.log.mgt.utils.LoggerUtils;
 import org.wso2.carbon.identity.core.util.IdentityTenantUtil;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.oauth.cache.OAuthCache;
 import org.wso2.carbon.identity.oauth.cache.OAuthCacheKey;
+import org.wso2.carbon.identity.oauth.common.OAuthConstants;
 import org.wso2.carbon.identity.oauth.dao.OAuthAppDO;
 import org.wso2.carbon.identity.oauth.dto.OAuthConsumerAppDTO;
 import org.wso2.carbon.identity.oauth.event.OAuthEventInterceptor;
@@ -45,10 +52,18 @@ import org.wso2.carbon.identity.oauth2.IdentityOAuth2ClientException;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2Exception;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2ServerException;
 import org.wso2.carbon.identity.oauth2.dao.OAuthTokenPersistenceFactory;
+import org.wso2.carbon.identity.oauth2.dao.SharedAppResolveDAO;
 import org.wso2.carbon.identity.oauth2.model.AccessTokenDO;
+import org.wso2.carbon.identity.oauth2.model.AuthzCodeDO;
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
 import org.wso2.carbon.identity.organization.management.service.exception.OrganizationManagementException;
-import org.wso2.carbon.registry.core.utils.UUIDGenerator;
+import org.wso2.carbon.identity.organization.management.service.util.OrganizationManagementUtil;
+import org.wso2.carbon.identity.role.v2.mgt.core.RoleConstants;
+import org.wso2.carbon.identity.role.v2.mgt.core.RoleManagementService;
+import org.wso2.carbon.identity.role.v2.mgt.core.exception.IdentityRoleManagementException;
+import org.wso2.carbon.identity.role.v2.mgt.core.model.AssociatedApplication;
+import org.wso2.carbon.identity.role.v2.mgt.core.model.Role;
+import org.wso2.carbon.idp.mgt.IdentityProviderManagementException;
 import org.wso2.carbon.user.api.Tenant;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
@@ -57,12 +72,15 @@ import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -70,7 +88,9 @@ import javax.crypto.spec.SecretKeySpec;
 import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants.CURRENT_SESSION_IDENTIFIER;
 import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants.CURRENT_TOKEN_IDENTIFIER;
 import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants.Config.PRESERVE_LOGGED_IN_SESSION_AT_PASSWORD_UPDATE;
+import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants.ORGANIZATION_LOGIN_HOME_REALM_IDENTIFIER;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.TokenBindings.NONE;
+import static org.wso2.carbon.identity.oauth.common.OAuthConstants.UserType.FEDERATED_USER_DOMAIN_PREFIX;
 
 /**
  * OAuth utility functionality.
@@ -78,7 +98,9 @@ import static org.wso2.carbon.identity.oauth.common.OAuthConstants.TokenBindings
 public final class OAuthUtil {
 
     public static final Log LOG = LogFactory.getLog(OAuthUtil.class);
-    private static final String ALGORITHM = "HmacSHA1";
+    private static final String ALGORITHM_SHA1 = "HmacSHA1";
+    private static final String ALGORITHM_SHA256 = "HmacSHA256";
+    private static final String managedOrgClaim = "http://wso2.org/claims/identity/managedOrg";
 
     private OAuthUtil() {
 
@@ -92,11 +114,42 @@ public final class OAuthUtil {
      */
     public static String getRandomNumber() throws IdentityOAuthAdminException {
         try {
-            String secretKey = UUIDGenerator.generateUUID();
-            String baseString = UUIDGenerator.generateUUID();
+            String secretKey = UUID.randomUUID().toString();
+            String baseString = UUID.randomUUID().toString();
+            SecretKeySpec key = new SecretKeySpec(secretKey.getBytes(Charsets.UTF_8), ALGORITHM_SHA1);
+            Mac mac = Mac.getInstance(ALGORITHM_SHA1);
+            mac.init(key);
+            byte[] rawHmac = mac.doFinal(baseString.getBytes(Charsets.UTF_8));
+            String random = Base64.encode(rawHmac);
+            // Registry doesn't have support for these character.
+            random = random.replace("/", "_");
+            random = random.replace("=", "a");
+            random = random.replace("+", "f");
+            return random;
+        } catch (Exception e) {
+            throw new IdentityOAuthAdminException("Error when generating a random number.", e);
+        }
+    }
 
-            SecretKeySpec key = new SecretKeySpec(secretKey.getBytes(Charsets.UTF_8), ALGORITHM);
-            Mac mac = Mac.getInstance(ALGORITHM);
+    /**
+     * Generates a securer random number using two UUIDs and HMAC-SHA256
+     *
+     * @return generated secure random number
+     * @throws IdentityOAuthAdminException Invalid Algorithm or Invalid Key
+     */
+    public static String getRandomNumberSecure() throws IdentityOAuthAdminException {
+        try {
+            String secretKey = UUID.randomUUID().toString();
+            String baseString = UUID.randomUUID().toString();
+
+            String hmacAlgorithm;
+            if (Boolean.parseBoolean(IdentityUtil.getProperty(IdentityConstants.OAuth.ENABLE_SHA256_PARAMS))) {
+                hmacAlgorithm = ALGORITHM_SHA256;
+            } else {
+                hmacAlgorithm = ALGORITHM_SHA1;
+            }
+            SecretKeySpec key = new SecretKeySpec(secretKey.getBytes(Charsets.UTF_8), hmacAlgorithm);
+            Mac mac = Mac.getInstance(hmacAlgorithm);
             mac.init(key);
             byte[] rawHmac = mac.doFinal(baseString.getBytes(Charsets.UTF_8));
             String random = Base64.encode(rawHmac);
@@ -130,7 +183,10 @@ public final class OAuthUtil {
             try {
                 userId = authenticatedUser.getUserId();
             } catch (UserIdNotFoundException e) {
-                LOG.error("User id cannot be found for user: " + authenticatedUser.getLoggableUserId());
+                // Masking getLoggableUserId as it will return the username because the user id is not available.
+                LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                        LoggerUtils.getMaskedContent(authenticatedUser.getLoggableUserId()) :
+                        authenticatedUser.getLoggableUserId()));
                 return;
             }
             clearOAuthCache(consumerKey, userId);
@@ -151,8 +207,14 @@ public final class OAuthUtil {
         try {
             userId = authorizedUser.getUserId();
         } catch (UserIdNotFoundException e) {
-            LOG.error("User id cannot be found for user: " + authorizedUser.getLoggableUserId());
-            return;
+            userId = resolveUserIdFromUsername(authorizedUser);
+            if (StringUtils.isEmpty(userId)) {
+                // Masking getLoggableUserId as it will return the username because the user id is not available.
+                LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                        LoggerUtils.getMaskedContent(authorizedUser.getLoggableUserId()) :
+                        authorizedUser.getLoggableUserId()));
+                return;
+            }
         }
         clearOAuthCacheWithAuthenticatedIDP(consumerKey, userId, authenticatedIDP);
     }
@@ -180,7 +242,10 @@ public final class OAuthUtil {
             try {
                 userId = authenticatedUser.getUserId();
             } catch (UserIdNotFoundException e) {
-                LOG.error("User id cannot be found for user: " + authenticatedUser.getLoggableUserId());
+                // Masking getLoggableUserId as it will return the username because the user id is not available.
+                LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                        LoggerUtils.getMaskedContent(authenticatedUser.getLoggableUserId()) :
+                        authenticatedUser.getLoggableUserId()));
                 return;
             }
             clearOAuthCache(consumerKey, userId, scope);
@@ -204,8 +269,14 @@ public final class OAuthUtil {
         try {
             userId = authorizedUser.getUserId();
         } catch (UserIdNotFoundException e) {
-            LOG.error("User id cannot be found for user: " + authorizedUser.getLoggableUserId());
-            return;
+            userId = resolveUserIdFromUsername(authorizedUser);
+            if (StringUtils.isEmpty(userId)) {
+                // Masking getLoggableUserId as it will return the username because the user id is not available.
+                LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                        LoggerUtils.getMaskedContent(authorizedUser.getLoggableUserId()) :
+                        authorizedUser.getLoggableUserId()));
+                return;
+            }
         }
         clearOAuthCacheWithAuthenticatedIDP(consumerKey, userId, scope, authenticatedIDP,
                 authorizedUser.getTenantDomain());
@@ -236,7 +307,10 @@ public final class OAuthUtil {
             try {
                 userId = authenticatedUser.getUserId();
             } catch (UserIdNotFoundException e) {
-                LOG.error("User id cannot be found for user: " + authenticatedUser.getLoggableUserId());
+                // Masking getLoggableUserId as it will return the username because the user id is not available.
+                LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                        LoggerUtils.getMaskedContent(authenticatedUser.getLoggableUserId()) :
+                        authenticatedUser.getLoggableUserId()));
                 return;
             }
             clearOAuthCache(consumerKey, userId, scope);
@@ -256,6 +330,23 @@ public final class OAuthUtil {
     public static void clearOAuthCache(String consumerKey, AuthenticatedUser authorizedUser, String scope,
                                        String tokenBindingReference) {
 
+        clearOAuthCache(consumerKey, authorizedUser, scope, tokenBindingReference,
+                OAuthConstants.AuthorizedOrganization.NONE);
+    }
+
+
+    /**
+     * Clear OAuth cache based on the application, authorized user, scope list and token binding reference.
+     *
+     * @param consumerKey            Client id of the application the token issued to.
+     * @param authorizedUser         Authorized user.
+     * @param scope                  Scope list.
+     * @param tokenBindingReference  Token binding reference.
+     * @param authorizedOrganization Authorized organization.
+     */
+    public static void clearOAuthCache(String consumerKey, AuthenticatedUser authorizedUser, String scope,
+                                       String tokenBindingReference, String authorizedOrganization) {
+
         String authenticatedIDP = OAuth2Util.getAuthenticatedIDP(authorizedUser);
 
         String userId;
@@ -265,11 +356,17 @@ public final class OAuthUtil {
             tenantDomain = authorizedUser.getTenantDomain();
 
         } catch (UserIdNotFoundException e) {
-            LOG.error("User id cannot be found for user: " + authorizedUser.getLoggableUserId());
+            // Masking getLoggableUserId as it will return the username because the user id is not available.
+            LOG.error("User id cannot be found for user: " + (LoggerUtils.isLogMaskingEnable ?
+                    LoggerUtils.getMaskedContent(authorizedUser.getLoggableUserId()) :
+                    authorizedUser.getLoggableUserId()));
             return;
         }
-        clearOAuthCacheByTenant(buildCacheKeyStringForToken(consumerKey, scope, userId,
-                authenticatedIDP, tokenBindingReference), tenantDomain);
+        if (authorizedUser.getAccessingOrganization() != null) {
+            authorizedOrganization = authorizedUser.getAccessingOrganization();
+        }
+        clearOAuthCacheByTenant(OAuth2Util.buildCacheKeyStringForTokenWithUserIdOrgId(consumerKey, scope, userId,
+                authenticatedIDP, tokenBindingReference, authorizedOrganization), tenantDomain);
     }
 
 
@@ -409,7 +506,7 @@ public final class OAuthUtil {
             handleError(message, exception);
         }
         if (exception instanceof IdentityOAuth2ClientException) {
-            return new IdentityOAuthClientException(exception.getErrorCode(), message, exception);
+            return new IdentityOAuthClientException(exception.getErrorCode(), message);
         } else if (exception instanceof IdentityOAuth2ServerException) {
             return new IdentityOAuthServerException(exception.getErrorCode(), message, exception);
         } else {
@@ -455,6 +552,17 @@ public final class OAuthUtil {
         dto.setTokenRevocationWithIDPSessionTerminationEnabled(appDO
                 .isTokenRevocationWithIDPSessionTerminationEnabled());
         dto.setTokenBindingValidationEnabled(appDO.isTokenBindingValidationEnabled());
+        dto.setTokenEndpointAuthMethod(appDO.getTokenEndpointAuthMethod());
+        dto.setTokenEndpointAuthSignatureAlgorithm(appDO.getTokenEndpointAuthSignatureAlgorithm());
+        dto.setSectorIdentifierURI(appDO.getSectorIdentifierURI());
+        dto.setIdTokenSignatureAlgorithm(appDO.getIdTokenSignatureAlgorithm());
+        dto.setRequestObjectSignatureAlgorithm(appDO.getRequestObjectSignatureAlgorithm());
+        dto.setTlsClientAuthSubjectDN(appDO.getTlsClientAuthSubjectDN());
+        dto.setSubjectType(appDO.getSubjectType());
+        dto.setRequestObjectEncryptionAlgorithm(appDO.getRequestObjectEncryptionAlgorithm());
+        dto.setRequestObjectEncryptionMethod(appDO.getRequestObjectEncryptionMethod());
+        dto.setRequirePushedAuthorizationRequests(appDO.isRequirePushedAuthorizationRequests());
+        dto.setFapiConformanceEnabled(appDO.isFapiConformanceEnabled());
         return dto;
     }
 
@@ -495,6 +603,46 @@ public final class OAuthUtil {
     }
 
     /**
+     * This will be called before when tokens are revoked through Listeners implicitly.
+     * The {@link OAuthEventInterceptor} implementations can be invoked pre user events
+     * for the user.
+     * @param userUUID - UUID of the user.
+     * @param params   - Additional parameters.
+     */
+    public static void invokePreRevocationBySystemListeners(String userUUID, Map<String, Object> params) {
+
+        OAuthEventInterceptor oAuthEventInterceptorProxy = OAuthComponentServiceHolder.getInstance()
+                .getOAuthEventInterceptorProxy();
+        if (oAuthEventInterceptorProxy != null && oAuthEventInterceptorProxy.isEnabled()) {
+            try {
+                oAuthEventInterceptorProxy.onPreTokenRevocationBySystem(userUUID, params);
+            } catch (IdentityOAuth2Exception e) {
+                LOG.error("Error while triggering listener for pre token revocation by system.", e);
+            }
+        }
+    }
+
+    /**
+     * This will be called after when tokens are revoked through Listeners implicitly.
+     * The {@link OAuthEventInterceptor} implementations can be invoked post user events
+     * for the user.
+     * @param userUUID - UUID of the user.
+     * @param params   - Additional parameters.
+     */
+    public static void invokePostRevocationBySystemListeners(String userUUID, Map<String, Object> params) {
+
+        OAuthEventInterceptor oAuthEventInterceptorProxy = OAuthComponentServiceHolder.getInstance()
+                .getOAuthEventInterceptorProxy();
+        if (oAuthEventInterceptorProxy != null && oAuthEventInterceptorProxy.isEnabled()) {
+            try {
+                oAuthEventInterceptorProxy.onPostTokenRevocationBySystem(userUUID, params);
+            } catch (IdentityOAuth2Exception e) {
+                LOG.error("Error while triggering listener for post token revocation by system.", e);
+            }
+        }
+    }
+
+    /**
      * Remove user claims from ClaimCache
      *
      * @param userName
@@ -515,13 +663,14 @@ public final class OAuthUtil {
     }
 
     /**
-     * This method will revoke the accesstokens of user.
-     * @param username username.
-     * @param userStoreManager userStoreManager.
+     * This method will revoke the authorization codes of user.
+     * @param username          username.
+     * @param userStoreManager  userStoreManager.
      * @return true if revocation is successfull. Else return false
-     * @throws UserStoreException
+     * @throws UserStoreException If an error occurred when revoking codes.
      */
-    public static boolean revokeTokens(String username, UserStoreManager userStoreManager) throws UserStoreException {
+    public static boolean revokeAuthzCodes(String username, UserStoreManager userStoreManager)
+            throws UserStoreException {
 
         String userStoreDomain = UserCoreUtil.getDomainName(userStoreManager.getRealmConfiguration());
         String tenantDomain = IdentityTenantUtil.getTenantDomain(userStoreManager.getTenantId());
@@ -530,27 +679,178 @@ public final class OAuthUtil {
         authenticatedUser.setTenantDomain(tenantDomain);
         authenticatedUser.setUserName(username);
 
-        /* This userStoreDomain variable is used for access token table partitioning. So it is set to null when access
-        token table partitioning is not enabled.*/
-        userStoreDomain = null;
-        if (OAuth2Util.checkAccessTokenPartitioningEnabled() && OAuth2Util.checkUserNameAssertionEnabled()) {
-            try {
-                userStoreDomain = OAuth2Util.getUserStoreForFederatedUser(authenticatedUser);
-            } catch (IdentityOAuth2Exception e) {
-                LOG.error("Error occurred while getting user store domain for User ID : " + authenticatedUser, e);
-                throw new UserStoreException(e);
+        List<AuthzCodeDO> authorizationCodes;
+        try {
+            authorizationCodes = OAuthTokenPersistenceFactory.getInstance()
+                    .getAuthorizationCodeDAO().getAuthorizationCodesDataByUser(authenticatedUser);
+            for (AuthzCodeDO authorizationCode : authorizationCodes) {
+                OAuthCache.getInstance().clearCacheEntry(new OAuthCacheKey(
+                        OAuth2Util.buildCacheKeyStringForAuthzCode(authorizationCode.getConsumerKey(),
+                                authorizationCode.getAuthorizationCode())));
+                OAuthTokenPersistenceFactory.getInstance().getAuthorizationCodeDAO()
+                        .updateAuthorizationCodeState(authorizationCode.getAuthorizationCode(),
+                                OAuthConstants.AuthorizationCodeState.REVOKED);
             }
+        } catch (IdentityOAuth2Exception e) {
+            String errorMsg = "Error occurred while revoking authorization codes for user: " + username;
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(errorMsg);
+            }
+            throw new UserStoreException(errorMsg, e);
         }
 
-        Set<String> clientIds;
+        return true;
+    }
+
+    /**
+     * This method can be used to build the AuthenticatedUser object.
+     * @param userStoreManager  userStoreManager.
+     * @param username          username.
+     * @param userStoreDomain   userStoreDomain.
+     * @return AuthenticatedUser.
+     */
+    private static AuthenticatedUser buildAuthenticatedUser(UserStoreManager userStoreManager, String username,
+                                                            String userStoreDomain, String tenantDomain)
+            throws UserStoreException {
+
+        AuthenticatedUser authenticatedUser = new AuthenticatedUser();
+        authenticatedUser.setUserStoreDomain(userStoreDomain);
+        authenticatedUser.setTenantDomain(tenantDomain);
+        authenticatedUser.setUserName(username);
+        boolean isOrganization;
         try {
-            // get all the distinct client Ids authorized by this user
-            clientIds = OAuthTokenPersistenceFactory.getInstance()
-                    .getTokenManagementDAO().getAllTimeAuthorizedClientIds(authenticatedUser);
-        } catch (IdentityOAuth2Exception e) {
-            LOG.error("Error occurred while retrieving apps authorized by User ID : " + authenticatedUser, e);
-            throw new UserStoreException(e);
+            isOrganization = OrganizationManagementUtil.isOrganization(tenantDomain);
+        } catch (OrganizationManagementException e) {
+            String msg = "Error occurred while check whether organization for the tenant : " + tenantDomain;
+            throw new UserStoreException(msg, e);
         }
+
+        if (!isOrganization) {
+            return authenticatedUser;
+        }
+
+        String userId = ((AbstractUserStoreManager) userStoreManager).getUser(null, username).getUserID();
+        Map<String, String> claimsMap = ((AbstractUserStoreManager) userStoreManager)
+                .getUserClaimValuesWithID(userId, new String[]{managedOrgClaim}, null);
+        String managedOrg = claimsMap.get(managedOrgClaim);
+        try {
+            String accessingOrg = OAuthComponentServiceHolder.getInstance().getOrganizationManager()
+                    .resolveOrganizationId(tenantDomain);
+            String primaryOrganizationId = OAuthComponentServiceHolder.getInstance().getOrganizationManager()
+                    .getPrimaryOrganizationId(accessingOrg);
+            tenantDomain = OAuthComponentServiceHolder.getInstance().getOrganizationManager()
+                    .resolveTenantDomain(primaryOrganizationId);
+            authenticatedUser.setTenantDomain(tenantDomain);
+
+            // Shared user flow.
+            if (managedOrg != null) {
+                authenticatedUser.setUserResidentOrganization(managedOrg);
+                authenticatedUser.setAccessingOrganization(accessingOrg);
+
+                // SSO login user shared flow.
+                if (!OAuthComponentServiceHolder.getInstance().getOrganizationManager()
+                        .isPrimaryOrganization(managedOrg)) {
+                    userId = OAuthComponentServiceHolder.getInstance().getOrganizationUserSharingService()
+                            .getUserAssociation(userId, accessingOrg).getAssociatedUserId();
+                    authenticatedUser.setUserName(userId);
+                    setOrganizationSSOUserDetails(authenticatedUser);
+                }
+                return authenticatedUser;
+            }
+
+            // Organization SSO user flow
+            authenticatedUser.setUserName(userId);
+            setOrganizationSSOUserDetails(authenticatedUser);
+            authenticatedUser.setUserResidentOrganization(accessingOrg);
+            authenticatedUser.setAccessingOrganization(accessingOrg);
+            return authenticatedUser;
+        } catch (OrganizationManagementException e) {
+            String msg = "Error occurred while resolving organization information for the tenant : " + tenantDomain;
+            throw new UserStoreException(msg, e);
+        } catch (IdentityProviderManagementException e) {
+            String msg = "Error occurred while resolving IDP name of the organization login IDP in : " + tenantDomain;
+            throw new UserStoreException(msg, e);
+        }
+    }
+
+    /**
+     * Get clientIds of associated application of an application role.
+     * @param role          Role object.
+     * @param authenticatedUser  Authenticated user.
+     * @return Set of clientIds of associated applications.
+     */
+    private static Set<String> getClientIdsOfAssociatedApplications(Role role, AuthenticatedUser authenticatedUser)
+            throws UserStoreException {
+
+        ApplicationManagementService applicationManagementService =
+                OAuthComponentServiceHolder.getInstance().getApplicationManagementService();
+        List<String> associatedApplications = role.getAssociatedApplications().stream()
+                .map(AssociatedApplication::getId).collect(Collectors.toList());
+        try {
+            if (authenticatedUser.getUserResidentOrganization() != null) {
+                List<String> newAssociatedApplications = new ArrayList<>();
+                for (String app : associatedApplications) {
+                    newAssociatedApplications.add(
+                            SharedAppResolveDAO.getMainApplication(app, authenticatedUser.getAccessingOrganization()));
+                }
+                associatedApplications = newAssociatedApplications;
+            }
+        } catch (IdentityOAuth2Exception e) {
+            throw new UserStoreException("Error occurred while getting the main applications of the shared apps.", e);
+        }
+        Set<String> clientIds = new HashSet<>();
+        associatedApplications.forEach(associatedApplication -> {
+            try {
+                ServiceProvider application = applicationManagementService
+                        .getApplicationByResourceId(associatedApplication, authenticatedUser.getTenantDomain());
+                if (application == null || application.getInboundAuthenticationConfig() == null) {
+                    return;
+                }
+                Arrays.stream(application.getInboundAuthenticationConfig().getInboundAuthenticationRequestConfigs())
+                        .forEach(inboundAuthenticationRequestConfig -> {
+                            if (ApplicationConstants.StandardInboundProtocols.OAUTH2.equals(
+                                    inboundAuthenticationRequestConfig.getInboundAuthType())) {
+                                clientIds.add(inboundAuthenticationRequestConfig.getInboundAuthKey());
+                            }
+                        });
+            } catch (IdentityApplicationManagementException e) {
+                String errorMessage = "Error occurred while retrieving application of id : " +
+                        associatedApplication;
+                LOG.error(errorMessage);
+            }
+        });
+        return clientIds;
+    }
+
+    /**
+     * This method will retrieve the role details of the given role id.
+     * @param roleId        Role Id.
+     * @param tenantDomain  Tenant domain.
+     * @return Role.
+     */
+    private static Role getRole(String roleId, String tenantDomain) throws UserStoreException {
+
+        try {
+            RoleManagementService roleV2ManagementService =
+                    OAuthComponentServiceHolder.getInstance().getRoleV2ManagementService();
+            return roleV2ManagementService.getRole(roleId, tenantDomain);
+        } catch (IdentityRoleManagementException e) {
+            String errorMessage = "Error occurred while retrieving role of id : " + roleId;
+            throw new UserStoreException(errorMessage, e);
+        }
+    }
+
+    /**
+     * Initiate token revocation process for the associated clientIds for the given user.
+     * @param clientIds          Set of clientIds
+     * @param authenticatedUser  Authenticated User object of the user.
+     * @param userStoreDomain    User store domain of the user.
+     * @param username           Username.
+     * @return True if token revocation is successful. Else return false.
+     */
+    private static boolean processTokenRevocation(Set<String> clientIds, AuthenticatedUser authenticatedUser,
+                                                  String userStoreDomain, String username) {
+
         boolean isErrorOnRevokingTokens = false;
         for (String clientId : clientIds) {
             try {
@@ -641,12 +941,85 @@ public final class OAuthUtil {
             }
         }
 
+        return isErrorOnRevokingTokens;
+    }
+
+    /**
+     * This method will revoke the access tokens of user.
+     * @param username username.
+     * @param userStoreManager userStoreManager.
+     * @param roleId roleId.
+     * @return true if revocation is successful. Else return false.
+     */
+    public static boolean revokeTokens(String username, UserStoreManager userStoreManager, String roleId)
+            throws UserStoreException {
+
+        String userStoreDomain = UserCoreUtil.getDomainName(userStoreManager.getRealmConfiguration());
+        String tenantDomain = IdentityTenantUtil.getTenantDomain(userStoreManager.getTenantId());
+        AuthenticatedUser authenticatedUser = buildAuthenticatedUser(userStoreManager, username, userStoreDomain,
+                tenantDomain);
+        /* This userStoreDomain variable is used for access token table partitioning. So it is set to null when access
+        token table partitioning is not enabled.*/
+        userStoreDomain = null;
+        if (OAuth2Util.checkAccessTokenPartitioningEnabled() && OAuth2Util.checkUserNameAssertionEnabled()) {
+            try {
+                userStoreDomain = OAuth2Util.getUserStoreForFederatedUser(authenticatedUser);
+            } catch (IdentityOAuth2Exception e) {
+                LOG.error("Error occurred while getting user store domain for User ID : " + authenticatedUser, e);
+                throw new UserStoreException(e);
+            }
+        }
+
+        // Get details about the role to identify the audience and associated applications.
+        Set<String> clientIds = null;
+        Role role;
+        boolean getClientIdsFromUser = false;
+        if (roleId != null) {
+            role = getRole(roleId, IdentityTenantUtil.getTenantDomain(userStoreManager.getTenantId()));
+            if (role != null && RoleConstants.APPLICATION.equals(role.getAudience())) {
+                // Get clientIds of associated applications for the specific application role.
+                clientIds = getClientIdsOfAssociatedApplications(role, authenticatedUser);
+            } else {
+                // Get all the distinct client Ids authorized by this user since this is an organization role.
+                getClientIdsFromUser = true;
+            }
+        } else {
+            // Get all the distinct client Ids authorized by this user since no role is specified.
+            getClientIdsFromUser = true;
+        }
+
+        if (getClientIdsFromUser) {
+            // Get all the distinct client Ids authorized by this user
+            try {
+                clientIds = OAuthTokenPersistenceFactory.getInstance()
+                        .getTokenManagementDAO().getAllTimeAuthorizedClientIds(authenticatedUser);
+            } catch (IdentityOAuth2Exception e) {
+                LOG.error("Error occurred while retrieving apps authorized by User ID : " + authenticatedUser, e);
+                throw new UserStoreException(e);
+            }
+        }
+
+        boolean isErrorOnRevokingTokens;
+        isErrorOnRevokingTokens = processTokenRevocation(clientIds, authenticatedUser, userStoreDomain, username);
+
         // Throw exception if there was any error found in revoking tokens.
         if (isErrorOnRevokingTokens) {
             throw new UserStoreException("Error occurred while revoking Access Tokens of the user " + username);
         }
         return true;
     }
+
+    /**
+     * This method will revoke the access tokens of user.
+     * @param username username.
+     * @param userStoreManager userStoreManager.
+     * @return true if revocation is successful. Else return false
+     */
+    public static boolean revokeTokens(String username, UserStoreManager userStoreManager) throws UserStoreException {
+
+        return revokeTokens(username, userStoreManager, null);
+    }
+
 
     private static void revokeTokens(List<AccessTokenDO> accessTokens) throws IdentityOAuth2Exception {
 
@@ -715,7 +1088,7 @@ public final class OAuthUtil {
                 Tenant tenant = OAuthComponentServiceHolder.getInstance().getRealmService()
                         .getTenantManager().getTenant(tenantID);
                 String accessedOrganizationId = tenant.getAssociatedOrganizationUUID();
-                if (accessedOrganizationId == null) {
+                if (StringUtils.isEmpty(accessedOrganizationId)) {
                     user = getUserFromTenant(username, userId, tenantID);
                 } else {
                     Optional<org.wso2.carbon.user.core.common.User> resolvedUser =
@@ -750,9 +1123,9 @@ public final class OAuthUtil {
             AbstractUserStoreManager userStoreManager =
                     (AbstractUserStoreManager) OAuthComponentServiceHolder.getInstance()
                             .getRealmService().getTenantUserRealm(tenantId).getUserStoreManager();
-            if (username != null && userStoreManager.isExistingUser(username)) {
+            if (StringUtils.isNotEmpty(username) && userStoreManager.isExistingUser(username)) {
                 user = getApplicationUser(userStoreManager.getUser(null, username));
-            } else if (userId != null && userStoreManager.isExistingUserWithID(userId)) {
+            } else if (StringUtils.isNotEmpty(userId) && userStoreManager.isExistingUserWithID(userId)) {
                 user = getApplicationUser(userStoreManager.getUser(userId, null));
             }
         } catch (org.wso2.carbon.user.api.UserStoreException e) {
@@ -787,5 +1160,43 @@ public final class OAuthUtil {
             username = IdentityUtil.addDomainToName(user.getUserName(), user.getUserStoreDomain());
         }
         return username;
+    }
+
+    /**
+     * Resolves user id from username in scenarios where user id is set as the username in organization specific flows.
+     *
+     * @param authorizedUser authorized user.
+     * @return userId  The user id.
+     */
+    private static String resolveUserIdFromUsername(AuthenticatedUser authorizedUser) {
+
+        String userId = null;
+        if (StringUtils.isNotBlank(authorizedUser.getTenantDomain()) &&
+                StringUtils.isNotBlank(authorizedUser.getUserName())) {
+            try {
+                Optional<org.wso2.carbon.user.core.common.User> resolvedUser = OAuthComponentServiceHolder
+                        .getInstance().getOrganizationUserResidentResolverService()
+                        .resolveUserFromResidentOrganization(
+                                null, authorizedUser.getUserName(), authorizedUser.getTenantDomain());
+                if (resolvedUser.isPresent()) {
+                    userId = resolvedUser.get().getUserID();
+                }
+            } catch (OrganizationManagementException e) {
+                LOG.debug("Error while getting user id from username: " + authorizedUser.getUserName(), e);
+            }
+        }
+        return userId;
+    }
+
+    private static void setOrganizationSSOUserDetails(AuthenticatedUser authenticatedUser)
+            throws IdentityProviderManagementException {
+
+        authenticatedUser.setFederatedUser(true);
+        authenticatedUser.setUserStoreDomain(FEDERATED_USER_DOMAIN_PREFIX);
+        IdentityProvider orgSsoIdp = OAuthComponentServiceHolder.getInstance().getIdpManager()
+                .getIdPByRealmId(ORGANIZATION_LOGIN_HOME_REALM_IDENTIFIER, authenticatedUser.getTenantDomain());
+        if (orgSsoIdp != null) {
+            authenticatedUser.setFederatedIdPName(orgSsoIdp.getIdentityProviderName());
+        }
     }
 }

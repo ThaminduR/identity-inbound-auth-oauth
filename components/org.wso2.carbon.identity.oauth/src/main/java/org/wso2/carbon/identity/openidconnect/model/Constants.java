@@ -18,6 +18,9 @@
 
 package org.wso2.carbon.identity.openidconnect.model;
 
+import org.wso2.carbon.base.MultitenantConstants;
+import org.wso2.carbon.utils.security.KeystoreUtils;
+
 /**
  * Constants for openid connect.
  */
@@ -45,6 +48,7 @@ public class Constants {
     public static final String JWKS_URI = "jwksURI";
     public static final String X509 = "X.509";
     public static final String SHA1 = "SHA-1";
+    public static final String SHA256 = "SHA-256";
 
 
     //JWS is consists of three parts seperated by 2 '.'s as JOSE header, JWS payload, JWS signature
@@ -56,5 +60,8 @@ public class Constants {
 
     public static final String FULL_STOP_DELIMITER = ".";
     public static final String DASH_DELIMITER = "-";
-    public static final String KEYSTORE_FILE_EXTENSION = ".jks";
+    @Deprecated
+    public static final String KEYSTORE_FILE_EXTENSION = KeystoreUtils.getKeyStoreFileExtension(
+            MultitenantConstants.SUPER_TENANT_DOMAIN_NAME);
+    public static final String REQUEST_OBJECT_SIGNING_ALG = "request_object_signing_alg";
 }

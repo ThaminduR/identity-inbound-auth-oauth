@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013, WSO2 LLC. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2013, WSO2 LLC. (https://www.wso2.com).
  *
- * WSO2 Inc. licenses this file to you under the Apache License,
+ * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -22,7 +22,6 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.gson.Gson;
-import org.apache.axiom.util.base64.Base64Utils;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.io.Charsets;
 import org.apache.commons.lang.ArrayUtils;
@@ -31,6 +30,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.utils.URIBuilder;
+import org.apache.oltu.oauth2.as.request.OAuthAuthzRequest;
 import org.apache.oltu.oauth2.as.response.OAuthASResponse;
 import org.apache.oltu.oauth2.common.OAuth;
 import org.apache.oltu.oauth2.common.exception.OAuthProblemException;
@@ -39,6 +39,7 @@ import org.owasp.encoder.Encode;
 import org.slf4j.MDC;
 import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.identity.api.resource.mgt.APIResourceMgtException;
 import org.wso2.carbon.identity.application.authentication.framework.cache.AuthenticationRequestCacheEntry;
 import org.wso2.carbon.identity.application.authentication.framework.config.builder.FileBasedConfigurationBuilder;
 import org.wso2.carbon.identity.application.authentication.framework.exception.UserIdNotFoundException;
@@ -49,10 +50,12 @@ import org.wso2.carbon.identity.application.authentication.framework.util.Framew
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkUtils;
 import org.wso2.carbon.identity.application.common.model.FederatedAuthenticatorConfig;
 import org.wso2.carbon.identity.application.common.model.IdentityProvider;
+import org.wso2.carbon.identity.application.common.model.LocalAndOutboundAuthenticationConfig;
 import org.wso2.carbon.identity.application.common.model.ServiceProvider;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationConstants;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationManagementUtil;
 import org.wso2.carbon.identity.application.mgt.ApplicationManagementService;
+import org.wso2.carbon.identity.central.log.mgt.utils.LogConstants;
 import org.wso2.carbon.identity.central.log.mgt.utils.LoggerUtils;
 import org.wso2.carbon.identity.core.ServiceURLBuilder;
 import org.wso2.carbon.identity.core.URLBuilderException;
@@ -79,6 +82,7 @@ import org.wso2.carbon.identity.oauth.endpoint.exception.InvalidApplicationClien
 import org.wso2.carbon.identity.oauth.endpoint.exception.InvalidRequestException;
 import org.wso2.carbon.identity.oauth.endpoint.exception.TokenEndpointBadRequestException;
 import org.wso2.carbon.identity.oauth.endpoint.message.OAuthMessage;
+import org.wso2.carbon.identity.oauth.par.core.ParAuthService;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2Exception;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2ScopeConsentException;
 import org.wso2.carbon.identity.oauth2.IdentityOAuth2ScopeException;
@@ -87,29 +91,41 @@ import org.wso2.carbon.identity.oauth2.OAuth2ScopeService;
 import org.wso2.carbon.identity.oauth2.OAuth2Service;
 import org.wso2.carbon.identity.oauth2.OAuth2TokenValidationService;
 import org.wso2.carbon.identity.oauth2.Oauth2ScopeConstants;
+import org.wso2.carbon.identity.oauth2.RequestObjectException;
 import org.wso2.carbon.identity.oauth2.bean.OAuthClientAuthnContext;
 import org.wso2.carbon.identity.oauth2.bean.Scope;
 import org.wso2.carbon.identity.oauth2.dto.OAuth2ClientValidationResponseDTO;
+import org.wso2.carbon.identity.oauth2.internal.OAuth2ServiceComponentHolder;
+import org.wso2.carbon.identity.oauth2.model.CarbonOAuthAuthzRequest;
 import org.wso2.carbon.identity.oauth2.model.OAuth2Parameters;
 import org.wso2.carbon.identity.oauth2.model.OAuth2ScopeConsentResponse;
 import org.wso2.carbon.identity.oauth2.scopeservice.OAuth2Resource;
 import org.wso2.carbon.identity.oauth2.scopeservice.ScopeMetadataService;
+import org.wso2.carbon.identity.oauth2.util.AuthzUtil;
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
+import org.wso2.carbon.identity.openidconnect.OIDCRequestObjectUtil;
+import org.wso2.carbon.identity.openidconnect.RequestObjectBuilder;
 import org.wso2.carbon.identity.openidconnect.RequestObjectService;
+import org.wso2.carbon.identity.openidconnect.RequestObjectValidator;
+import org.wso2.carbon.identity.openidconnect.model.RequestObject;
 import org.wso2.carbon.identity.webfinger.DefaultWebFingerProcessor;
 import org.wso2.carbon.identity.webfinger.WebFingerProcessor;
 import org.wso2.carbon.idp.mgt.IdentityProviderManagementException;
 import org.wso2.carbon.idp.mgt.IdentityProviderManager;
 import org.wso2.carbon.idp.mgt.IdpManager;
+import org.wso2.carbon.utils.DiagnosticLog;
 import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
 
 import java.io.IOException;
 import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -121,12 +137,16 @@ import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServletResponseWrapper;
 import javax.ws.rs.core.MultivaluedMap;
 
 import static org.apache.commons.lang.StringUtils.isNotBlank;
 import static org.wso2.carbon.identity.application.authentication.framework.util.FrameworkUtils.getRedirectURL;
+import static org.wso2.carbon.identity.oauth.common.OAuthConstants.CODE;
+import static org.wso2.carbon.identity.oauth.common.OAuthConstants.CODE_IDTOKEN;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.HTTP_REQ_HEADER_AUTH_METHOD_BASIC;
 import static org.wso2.carbon.identity.oauth.common.OAuthConstants.OauthAppStates.APP_STATE_ACTIVE;
+import static org.wso2.carbon.identity.oauth.common.OAuthConstants.ResponseModes.JWT;
 
 /**
  * Util class which contains common methods used by all the OAuth endpoints.
@@ -140,11 +160,12 @@ public class EndpointUtil {
     private static final String OAUTH2_AUTHORIZE = "/oauth2/authorize";
     public static final String OAUTH2_CIBA_ENDPOINT = "oauth2/ciba";
     private static final String UTF_8 = "UTF-8";
-    private static final String PROP_CLIENT_ID = "client_id";
+    public static final String PROP_CLIENT_ID = "client_id";
     private static final String PROP_GRANT_TYPE = "response_type";
     private static final String PROP_RESPONSE_TYPE = "response_type";
     private static final String PROP_SCOPE = "scope";
     private static final String PROP_OIDC_SCOPE = "requested_oidc_scopes";
+    private static final String PROP_CONSENT_SKIP_SCOPE = "consent_skip_scopes";
     private static final String PROP_ERROR = "error";
     private static final String PROP_ERROR_DESCRIPTION = "error_description";
     private static final String PROP_REDIRECT_URI = "redirect_uri";
@@ -159,9 +180,11 @@ public class EndpointUtil {
     private static OAuthServerConfiguration oauthServerConfiguration;
     private static RequestObjectService requestObjectService;
     private static CibaAuthServiceImpl cibaAuthService;
+    private static ParAuthService parAuthService;
     private static IdpManager idpManager;
     private static final String ALLOW_ADDITIONAL_PARAMS_FROM_ERROR_URL = "OAuth.AllowAdditionalParamsFromErrorUrl";
     private static final String IDP_ENTITY_ID = "IdPEntityId";
+    private static Class<? extends OAuthAuthzRequest> oAuthAuthzRequestClass;
 
     public static void setIdpManager(IdpManager idpManager) {
 
@@ -361,18 +384,22 @@ public class EndpointUtil {
         }
         String errMsg = "Error decoding authorization header. Space delimited \"<authMethod> <base64encoded" +
                 "(username:password)>\" format violated.";
-        String[] splitValues = authorizationHeader.trim().split(" ");
-        if (splitValues.length == 2) {
-            if (HTTP_REQ_HEADER_AUTH_METHOD_BASIC.equals(splitValues[0])) {
-                byte[] decodedBytes = Base64Utils.decode(splitValues[1].trim());
-                String userNamePassword = new String(decodedBytes, Charsets.UTF_8);
-                String[] credentials = userNamePassword.split(":");
-                if (credentials.length == 2) {
-                    return credentials;
+        String[] authHeaderComponents = authorizationHeader.trim().split(" ");
+        if (authHeaderComponents.length == 2) {
+            if (HTTP_REQ_HEADER_AUTH_METHOD_BASIC.equals(authHeaderComponents[0])) {
+                try {
+                    byte[] decodedBytes = Base64.getDecoder().decode(authHeaderComponents[1].trim());
+                    String userNamePassword = new String(decodedBytes, Charsets.UTF_8);
+                    String[] credentials = userNamePassword.split(":");
+                    if (credentials.length == 2) {
+                        return credentials;
+                    }
+                } catch (IllegalArgumentException e) {
+                    throw new OAuthClientException("Error decoding authorization header. " + e.getMessage());
                 }
             } else {
-                errMsg = "Error decoding authorization header.Unsupported authentication type:" + splitValues[0] + "" +
-                        " is provided in the Authorization Header.";
+                errMsg = "Error decoding authorization header. Unsupported authentication type: " +
+                        authHeaderComponents[0] + " is provided in the Authorization Header.";
             }
         }
         throw new OAuthClientException(errMsg);
@@ -767,6 +794,7 @@ public class EndpointUtil {
             throws OAuthSystemException {
 
         String queryString = "";
+        String clientId = "";
         if (log.isDebugEnabled()) {
             log.debug("Received Session Data Key is: " + sessionDataKey);
             if (params == null) {
@@ -777,6 +805,7 @@ public class EndpointUtil {
         boolean isOIDC = false;
         if (params != null) {
             isOIDC = OAuth2Util.isOIDCAuthzRequest(params.getScopes());
+            clientId = params.getClientId();
         }
 
         SessionDataCache sessionDataCache = SessionDataCache.getInstance();
@@ -795,7 +824,14 @@ public class EndpointUtil {
                 queryString = getQueryString(params, entry);
             }
 
-            if (isOIDC) {
+            ServiceProvider sp = getServiceProvider(params);
+            if (sp == null) {
+                throw new OAuthSystemException("Unable to find a service provider with client_id: " + clientId);
+            }
+
+            if (isExternalConsentPageEnabledForSP(sp)) {
+                consentPageUrl = OAuth2Util.resolveExternalConsentPageUrl(sp.getTenantDomain());
+            } else if (isOIDC) {
                 consentPageUrl = OAuth2Util.OAuthURL.getOIDCConsentPageUrl();
             } else {
                 consentPageUrl = OAuth2Util.OAuthURL.getOAuth2ConsentPageUrl();
@@ -809,7 +845,7 @@ public class EndpointUtil {
                 } else {
                     consentPageUrl += URLEncoder.encode(params.getApplicationName(), UTF_8);
                 }
-                consentPageUrl += "&tenantDomain=" + getSPTenantDomainFromClientId(params.getClientId());
+                consentPageUrl += "&tenantDomain=" + getSPTenantDomainFromClientId(clientId);
 
                 if (entry != null) {
                     user = entry.getLoggedInUser();
@@ -837,6 +873,9 @@ public class EndpointUtil {
                     // Filter the query parameters from the consent page url.
                     consentPageUrl = filterQueryParamsFromConsentPageUrl(entry.getEndpointParams(), consentPageUrl,
                             sessionDataKeyConsent);
+                    if (isExternalConsentPageEnabledForSP(sp)) {
+                        entry.setRemoveOnConsume(true);
+                    }
                     entry.setValidityPeriod(TimeUnit.MINUTES.toNanos(IdentityUtil.getTempDataCleanUpTimeout()));
                     sessionDataCache.addToCache(new SessionDataCacheKey(sessionDataKeyConsent), entry);
                 } else {
@@ -849,9 +888,21 @@ public class EndpointUtil {
             }
         } catch (UnsupportedEncodingException e) {
             throw new OAuthSystemException("Error while encoding the url", e);
+        } catch (IdentityOAuth2Exception e) {
+            throw new OAuthSystemException("Error retrieve Service Provider for clientId:" + clientId , e);
         }
 
         return consentPageUrl;
+    }
+
+
+    private static ServiceProvider getServiceProvider(OAuth2Parameters params) throws IdentityOAuth2Exception {
+
+        ServiceProvider sp = null;
+        if (params != null) {
+            sp = OAuth2Util.getServiceProvider(params.getClientId());
+        }
+        return sp;
     }
 
     private static String getScopeMetadataQueryParam(Set<String> scopes, String tenantDomain) {
@@ -870,7 +921,9 @@ public class EndpointUtil {
             String scopeMetadata = new Gson().toJson(scopesMetaData);
             return "scopeMetadata=" + URLEncoder.encode(scopeMetadata, UTF_8);
         } catch (Exception e) {
-            log.warn("Error while retrieving scope metadata for scopes: " + scopes, e);
+            if (log.isDebugEnabled()) {
+                log.debug("Error while retrieving scope metadata for scopes: " + scopes, e);
+            }
         }
         return null;
     }
@@ -882,6 +935,9 @@ public class EndpointUtil {
         if (isAuthEndpointRedirectParamsFilterConfigAvailable()) {
             return FrameworkUtils.getRedirectURLWithFilteredParams(consentPageUrl,
                     endpointParams);
+        } else if (isConsentPageRedirectParamsAllowed()) {
+            // Return the consent url without filtering the query params for backward compatibility.
+            return consentPageUrl;
         } else {
             return EndpointUtil.getRedirectURLWithFilteredParams(consentPageUrl,
                     endpointParams, sessionDataKeyConsent);
@@ -900,25 +956,35 @@ public class EndpointUtil {
     private static String getQueryString(OAuth2Parameters params, SessionDataCacheEntry entry) throws
             UnsupportedEncodingException, OAuthSystemException {
 
-        String queryString;
-        queryString = entry.getQueryString();
-        if (queryString.contains(REQUEST_URI) && params != null) {
+        StringBuilder queryStringBuilder = new StringBuilder();
+        queryStringBuilder.append(entry.getQueryString());
+        if (entry.getQueryString().contains(REQUEST_URI) && params != null) {
             // When request_uri requests come without redirect_uri, we need to append it to the SPQueryParams
             // to be used in storing consent data
-            queryString = queryString +
-                    "&" + PROP_REDIRECT_URI + "=" + URLEncoder.encode(params.getRedirectURI(), UTF_8);
+            queryStringBuilder.append('&').append(PROP_REDIRECT_URI).append('=')
+                    .append(URLEncoder.encode(params.getRedirectURI(), UTF_8));
         }
 
         if (params != null) {
-            queryString = queryString + "&" + PROP_OIDC_SCOPE +
-                    "=" + URLEncoder.encode(StringUtils.join(getRequestedOIDCScopes(params), " "), UTF_8);
+            queryStringBuilder.append('&').append(PROP_OIDC_SCOPE).append('=')
+                    .append(URLEncoder.encode(StringUtils.join(getRequestedOIDCScopes(params), " "), UTF_8));
         }
+        if (entry.getAuthzReqMsgCtx() != null) {
+            String[] filteredAllowedScopes = (String[]) entry.getAuthzReqMsgCtx()
+                    .getProperty(OAuthConstants.ALLOWED_SCOPES_PROPERTY);
+            if (ArrayUtils.isNotEmpty(filteredAllowedScopes)) {
+                queryStringBuilder.append('&').append(PROP_CONSENT_SKIP_SCOPE).append('=')
+                        .append(URLEncoder.encode(StringUtils.join(filteredAllowedScopes, " "), UTF_8));
+            }
+        }
+        String queryString = queryStringBuilder.toString();
         entry.setQueryString(queryString);
         queryString = URLEncoder.encode(queryString, UTF_8);
         return queryString;
     }
 
     private static boolean isAuthEndpointRedirectParamsFilterConfigAvailable() {
+
         return FileBasedConfigurationBuilder.getInstance().isAuthEndpointRedirectParamsConfigAvailable();
     }
 
@@ -1001,6 +1067,13 @@ public class EndpointUtil {
     public static void storeOAuthScopeConsent(AuthenticatedUser user, OAuth2Parameters params,
                                               boolean overrideExistingConsent) throws OAuthSystemException {
 
+        DiagnosticLog.DiagnosticLogBuilder diagnosticLogBuilder = null;
+        if (LoggerUtils.isDiagnosticLogsEnabled()) {
+            diagnosticLogBuilder = new DiagnosticLog.DiagnosticLogBuilder(
+                    OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE,
+                    OAuthConstants.LogConstants.ActionIDs.PERSIST_OAUTH_SCOPE_CONSENT);
+            diagnosticLogBuilder.logDetailLevel(DiagnosticLog.LogDetailLevel.APPLICATION);
+        }
         try {
             Set<String> userApprovedScopesSet = params.getConsentRequiredScopes();
             if (CollectionUtils.isNotEmpty(userApprovedScopesSet)) {
@@ -1041,28 +1114,35 @@ public class EndpointUtil {
                                 userApprovedScopes, null);
                     }
                 }
-                if (LoggerUtils.isDiagnosticLogsEnabled()) {
-                    Map<String, Object> consentParams = new HashMap<>();
-                    consentParams.put("clientId", params.getClientId());
-                    consentParams.put("approvedScopes", userApprovedScopes);
-                    consentParams.put("user", userId);
-
-                    Map<String, Object> configs = new HashMap<>();
-                    configs.put("overrideExistingConsent", String.valueOf(overrideExistingConsent));
-                    LoggerUtils
-                            .triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, consentParams,
-                                    OAuthConstants.LogConstants.SUCCESS, "Successfully persisted oauth scopes.",
-                                    "persist-oauth-scope-consent", configs);
+                if (diagnosticLogBuilder != null) {
+                    // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                    diagnosticLogBuilder.inputParam(LogConstants.InputKeys.CLIENT_ID, params.getClientId())
+                            .inputParam("approved scopes", userApprovedScopes)
+                            .inputParam(LogConstants.InputKeys.USER_ID, userId)
+                            .inputParam("override existing consent", overrideExistingConsent)
+                            .resultMessage("Successfully persisted oauth scopes.")
+                            .resultStatus(DiagnosticLog.ResultStatus.SUCCESS);
+                    LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
                 }
             }
         } catch (IdentityOAuthAdminException e) {
-            LoggerUtils.triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, null,
-                    OAuthConstants.LogConstants.FAILED, "System error occurred.", "persist-oauth-scope-consent", null);
+            if (diagnosticLogBuilder != null) {
+                // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                diagnosticLogBuilder.inputParam(LogConstants.InputKeys.ERROR_MESSAGE, e.getMessage())
+                        .resultMessage("Error occurred while removing OIDC scopes from approved OAuth scopes.")
+                        .resultStatus(DiagnosticLog.ResultStatus.FAILED);
+                LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
+            }
             throw new OAuthSystemException(
                     "Error occurred while removing OIDC scopes from approved OAuth scopes.", e);
         } catch (IdentityOAuth2ScopeException e) {
-            LoggerUtils.triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, null,
-                    OAuthConstants.LogConstants.FAILED, "System error occurred.", "persist-oauth-scope-consent", null);
+            if (diagnosticLogBuilder != null) {
+                // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                diagnosticLogBuilder.inputParam(LogConstants.InputKeys.ERROR_MESSAGE, e.getMessage())
+                        .resultMessage("Error occurred while storing OAuth scope consent.")
+                        .resultStatus(DiagnosticLog.ResultStatus.FAILED);
+                LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
+            }
             throw new OAuthSystemException("Error occurred while storing OAuth scope consent.", e);
         }
     }
@@ -1113,15 +1193,16 @@ public class EndpointUtil {
         if (CollectionUtils.isNotEmpty(allowedScopes)) {
             try {
                 startTenantFlow(params.getTenantDomain());
-                /* If DropUnregisteredScopes scopes config is enabled
-                 then any unregistered scopes(excluding internal scopes
-                 and allowed scopes) will be dropped. Therefore, they will
-                 not be shown in the user consent screen.*/
+                /* If DropUnregisteredScopes scopes config is enabled then any unregistered scopes(excluding internal
+                 scopes and allowed scopes) will be dropped. Therefore, they will not be shown in the user consent
+                 screen.*/
                 if (oauthServerConfiguration.isDropUnregisteredScopes()) {
                     if (log.isDebugEnabled()) {
                         log.debug("DropUnregisteredScopes config is enabled. Attempting to drop unregistered scopes.");
                     }
-                    allowedScopes = dropUnregisteredScopes(params);
+                    if (AuthzUtil.isLegacyAuthzRuntime()) {
+                        allowedScopes = dropUnregisteredScopes(params);
+                    }
                 }
                 for (String scope : allowedScopes) {
                     allowedRegisteredScopes.add(scope);
@@ -1173,7 +1254,7 @@ public class EndpointUtil {
         try {
             return user.getUserId();
         } catch (UserIdNotFoundException e) {
-            throw new OAuthSystemException("User id not found for user: " + user.getLoggableUserId(), e);
+            throw new OAuthSystemException("User id not found for user: " + user.getLoggableMaskedUserId(), e);
         }
     }
 
@@ -1210,7 +1291,7 @@ public class EndpointUtil {
     private static Set<String> dropUnregisteredScopes(OAuth2Parameters params) throws OAuthSystemException {
 
         Set<String> requestedScopes = new HashSet<>(params.getScopes());
-        Set<String> registeredScopes = getRegisteredScopes(requestedScopes);
+        Set<String> registeredScopes = getRegisteredScopes(requestedScopes, params.getTenantDomain());
         List<String> allowedScopesFromConfig = oauthServerConfiguration.getAllowedScopes();
         Set<String> filteredScopes = new HashSet<>();
 
@@ -1238,16 +1319,43 @@ public class EndpointUtil {
         return filteredScopes;
     }
 
-    private static Set<String> getRegisteredScopes(Set<String> requestedScopes) throws OAuthSystemException {
+    private static Set<String> getRegisteredScopes(Set<String> requestedScopes, String tenantDomain)
+            throws OAuthSystemException {
 
         try {
             String requestedScopesStr = StringUtils.join(requestedScopes, " ");
             Set<String> registeredScopes = new HashSet<>();
             Set<Scope> registeredScopeSet = oAuth2ScopeService.getScopes(null, null, true, requestedScopesStr);
             registeredScopeSet.forEach(scope -> registeredScopes.add(scope.getName()));
+            if (!AuthzUtil.isLegacyAuthzRuntime()) {
+                List<String> registeredAPIScopes = getRegisteredAPIScopes(requestedScopes, tenantDomain);
+                registeredScopes.addAll(registeredAPIScopes);
+            }
             return registeredScopes;
-        } catch (IdentityOAuth2ScopeServerException e) {
+        } catch (IdentityOAuth2ScopeServerException | IdentityOAuth2Exception e) {
             throw new OAuthSystemException("Error occurred while retrieving registered scopes.", e);
+        }
+    }
+
+    /**
+     * Get Scopes of registered API.
+     *
+     * @param tenantDomain Tenant domain.
+     * @return Registered scopes.
+     * @throws IdentityOAuth2Exception if an error occurs while retrieving internal scopes for tenant domain.
+     */
+    private static List<String> getRegisteredAPIScopes(Set<String> requestedScopes, String tenantDomain)
+            throws IdentityOAuth2Exception {
+
+        try {
+            List<org.wso2.carbon.identity.application.common.model.Scope> scopes = OAuth2ServiceComponentHolder
+                    .getInstance().getApiResourceManager().getScopesByTenantDomain(tenantDomain, null);
+            return scopes.stream().map(org.wso2.carbon.identity.application.common.model.Scope::getName)
+                    .filter(requestedScopes::contains)
+                    .collect(Collectors.toList());
+        } catch (APIResourceMgtException e) {
+            throw new IdentityOAuth2Exception("Error while retrieving internal scopes for tenant domain : "
+                    + tenantDomain, e);
         }
     }
 
@@ -1296,20 +1404,26 @@ public class EndpointUtil {
 
     public static boolean validateParams(HttpServletRequest request, Map<String, List<String>> paramMap) {
 
+        DiagnosticLog.DiagnosticLogBuilder diagnosticLogBuilder = null;
+        if (LoggerUtils.isDiagnosticLogsEnabled()) {
+            diagnosticLogBuilder = new DiagnosticLog.DiagnosticLogBuilder(
+                    OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE,
+                    OAuthConstants.LogConstants.ActionIDs.VALIDATE_INPUT_PARAMS);
+            diagnosticLogBuilder.logDetailLevel(DiagnosticLog.LogDetailLevel.APPLICATION)
+                    .resultStatus(DiagnosticLog.ResultStatus.FAILED);
+        }
         if (paramMap != null) {
             for (Map.Entry<String, List<String>> paramEntry : paramMap.entrySet()) {
                 if (paramEntry.getValue().size() > 1) {
                     if (log.isDebugEnabled()) {
                         log.debug("Repeated param found:" + paramEntry.getKey());
                     }
-                    if (LoggerUtils.isDiagnosticLogsEnabled()) {
-                        Map<String, Object> logParams = new HashMap<>();
-                        paramMap.forEach(logParams::put);
-                        LoggerUtils
-                                .triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, logParams,
-                                        OAuthConstants.LogConstants.FAILED,
-                                        "Parameter with name: '" + paramEntry.getKey() +
-                                                "' is repeated in the request.", "validate-input-parameters", null);
+                    if (diagnosticLogBuilder != null) {
+                        // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                        diagnosticLogBuilder.inputParam("param keys", paramMap.keySet())
+                                .resultMessage("Parameter with name: '" + paramEntry.getKey() + "' is repeated in " +
+                                        "the request.");
+                        LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
                     }
                     return false;
                 }
@@ -1323,14 +1437,12 @@ public class EndpointUtil {
                         log.debug("Repeated param found:" + entry.getKey());
 
                     }
-                    if (LoggerUtils.isDiagnosticLogsEnabled()) {
-                        Map<String, Object> logParams = new HashMap<>();
-                        map.forEach(logParams::put);
-                        LoggerUtils
-                                .triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, logParams,
-                                        OAuthConstants.LogConstants.FAILED,
-                                        "Parameter with name: '" + entry.getKey() + "' is repeated in the request.",
-                                        "validate-input-parameters", null);
+                    if (diagnosticLogBuilder != null) {
+                        // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                        diagnosticLogBuilder.inputParam("param keys", map.keySet())
+                                .resultMessage("Parameter with name: '" + entry.getKey() + "' is repeated in the " +
+                                        "request.");
+                        LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
                     }
                     return false;
                 }
@@ -1399,17 +1511,25 @@ public class EndpointUtil {
 
         String appState = EndpointUtil.getOAuth2Service().getOauthApplicationState(consumerKey);
 
+        DiagnosticLog.DiagnosticLogBuilder diagnosticLogBuilder = null;
+        if (LoggerUtils.isDiagnosticLogsEnabled()) {
+            diagnosticLogBuilder = new DiagnosticLog.DiagnosticLogBuilder(
+                    OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE,
+                    OAuthConstants.LogConstants.ActionIDs.VALIDATE_OAUTH_CLIENT);
+            diagnosticLogBuilder.inputParam(LogConstants.InputKeys.CLIENT_ID, consumerKey)
+                    .logDetailLevel(DiagnosticLog.LogDetailLevel.APPLICATION)
+                    .logDetailLevel(DiagnosticLog.LogDetailLevel.APPLICATION);
+        }
         if (StringUtils.isEmpty(appState)) {
             if (log.isDebugEnabled()) {
                 log.debug("A valid OAuth client could not be found for client_id: " + consumerKey);
             }
-            if (LoggerUtils.isDiagnosticLogsEnabled()) {
-                Map<String, Object> params = new HashMap<>();
-                params.put("clientId", consumerKey);
-                LoggerUtils.triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, params,
-                        OAuthConstants.LogConstants.FAILED,
-                        "A valid OAuth application could not be found for the given client_id.",
-                        "validate-oauth-client", null);
+            if (diagnosticLogBuilder != null) {
+                // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                diagnosticLogBuilder.resultMessage("A valid OAuth application could not be found for the given " +
+                        "client_id.")
+                        .resultStatus(DiagnosticLog.ResultStatus.FAILED);
+                LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
             }
             throw new InvalidApplicationClientException("A valid OAuth client could not be found for client_id: " +
                     Encode.forHtml(consumerKey));
@@ -1419,13 +1539,12 @@ public class EndpointUtil {
             if (log.isDebugEnabled()) {
                 log.debug("App is not in active state in client ID: " + consumerKey + ". App state is:" + appState);
             }
-            if (LoggerUtils.isDiagnosticLogsEnabled()) {
-                Map<String, Object> params = new HashMap<>();
-                params.put("clientId", consumerKey);
-                params.put("appState", appState);
-                LoggerUtils.triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, params,
-                        OAuthConstants.LogConstants.FAILED, "OAuth application is not in active state.",
-                        "validate-oauth-client", null);
+            if (diagnosticLogBuilder != null) {
+                // diagnosticLogBuilder is null when diagnostic logs are disabled.
+                diagnosticLogBuilder.inputParam(OAuthConstants.LogConstants.InputKeys.APP_STATE, appState)
+                        .resultMessage("OAuth application is not in active state.")
+                        .resultStatus(DiagnosticLog.ResultStatus.FAILED);
+                LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
             }
             throw new InvalidApplicationClientException("Oauth application is not in active state");
         }
@@ -1433,13 +1552,12 @@ public class EndpointUtil {
         if (log.isDebugEnabled()) {
             log.debug("Oauth App validation success for consumer key: " + consumerKey);
         }
-        if (LoggerUtils.isDiagnosticLogsEnabled()) {
-            Map<String, Object> params = new HashMap<>();
-            params.put("clientId", consumerKey);
-            params.put("appState", appState);
-            LoggerUtils.triggerDiagnosticLogEvent(OAuthConstants.LogConstants.OAUTH_INBOUND_SERVICE, params,
-                    OAuthConstants.LogConstants.SUCCESS, "OAuth Application validation is successful.",
-                    "validate-oauth-client", null);
+        if (diagnosticLogBuilder != null) {
+            // diagnosticLogBuilder is null when diagnostic logs are disabled.
+            diagnosticLogBuilder.inputParam(OAuthConstants.LogConstants.InputKeys.APP_STATE, appState)
+                    .resultMessage("OAuth application is in active state.")
+                    .resultStatus(DiagnosticLog.ResultStatus.SUCCESS);
+            LoggerUtils.triggerDiagnosticLogEvent(diagnosticLogBuilder);
         }
     }
 
@@ -1448,6 +1566,13 @@ public class EndpointUtil {
         return !APP_STATE_ACTIVE.equalsIgnoreCase(appState);
     }
 
+    /**
+     * This method retrieves the service provider tenant domain using the client ID.
+     * However, internally it uses the tenant present in the carbon context.
+     *
+     * @param clientId Client id of the application.
+     * @return Tenant domain of the service provider.
+     */
     public static String getSPTenantDomainFromClientId(String clientId) {
 
         try {
@@ -1616,6 +1741,26 @@ public class EndpointUtil {
     }
 
     /**
+     * Get instance of parAuthService.
+     *
+     * @return parAuthService
+     */
+    public static ParAuthService getParAuthService() {
+
+        return parAuthService;
+    }
+
+    /**
+     * Set instance of parAuthService.
+     *
+     * @param parAuthService parAuthService
+     */
+    public static void setParAuthService(ParAuthService parAuthService) {
+
+        EndpointUtil.parAuthService = parAuthService;
+    }
+
+    /**
      * This method retrieve the state to append to the error page URL.
      * If the state is available in OAuth2Parameters it will retrieve state from OAuth2Parameters.
      * If the state is not available in OAuth2Parameters, then the state will be retrieved from request object.
@@ -1629,7 +1774,18 @@ public class EndpointUtil {
     public static String retrieveStateForErrorURL(HttpServletRequest request, OAuth2Parameters oAuth2Parameters) {
 
         String state = null;
-        if (oAuth2Parameters != null && oAuth2Parameters.getState() != null) {
+
+        if (request.getParameter(OAuthConstants.OAuth20Params.REQUEST) != null) {
+            String stateInsideRequestObj = getStateFromRequestObject(request, oAuth2Parameters);
+            if (StringUtils.isNotBlank(stateInsideRequestObj)) {
+                state = stateInsideRequestObj;
+                if (log.isDebugEnabled()) {
+                    log.debug("Retrieved state value " + state + " from request object.");
+                }
+            }
+        }
+
+        if (StringUtils.isBlank(state) && oAuth2Parameters != null && oAuth2Parameters.getState() != null) {
             state = oAuth2Parameters.getState();
             if (log.isDebugEnabled()) {
                 log.debug("Retrieved state value " + state + " from OAuth2Parameters.");
@@ -1642,6 +1798,35 @@ public class EndpointUtil {
             }
         }
         return state;
+    }
+
+    private static String getStateFromRequestObject(HttpServletRequest request, OAuth2Parameters oAuth2Parameters) {
+
+        try {
+            RequestObjectValidator requestObjectValidator = OAuthServerConfiguration.getInstance()
+                    .getRequestObjectValidator();
+            RequestObjectBuilder requestObjectBuilder = OAuthServerConfiguration.getInstance()
+                    .getRequestObjectBuilders().get(OIDCRequestObjectUtil.REQUEST_PARAM_VALUE_BUILDER);
+            RequestObject requestObject =
+                    requestObjectBuilder.buildRequestObject(request.getParameter(OAuthConstants.OAuth20Params.REQUEST),
+                            oAuth2Parameters);
+            if (StringUtils.isBlank(oAuth2Parameters.getClientId())) {
+                // Set client id and tenant domain required for signature validation if not already set.
+                String clientId = request.getParameter(PROP_CLIENT_ID);
+                oAuth2Parameters.setClientId(clientId);
+                oAuth2Parameters.setTenantDomain(getSPTenantDomainFromClientId(clientId));
+            }
+            // Validate request object signature to ensure request object is not tampered.
+            OIDCRequestObjectUtil.validateRequestObjectSignature(oAuth2Parameters, requestObject,
+                    requestObjectValidator);
+            return requestObject.getClaimValue(OAuthConstants.OAuth20Params.STATE);
+        } catch (RequestObjectException e) {
+            /* If request object signature validation fails, logs and return null from this method and the state value
+            will be overridden from oauth2 parameters or request parameters if present inside the
+            retrieveStateForErrorURL method. */
+            log.debug("Error while retrieving state from request object.", e);
+        }
+        return null;
     }
 
     /**
@@ -1723,4 +1908,127 @@ public class EndpointUtil {
                 .getValue();
     }
 
+    /**
+     * Used to check whether the external consent page is enabled in service provider.
+     *
+     * @param serviceProvider Service Provider.
+     * @return True if the external consent page is enabled.
+     */
+    public static boolean isExternalConsentPageEnabledForSP(ServiceProvider serviceProvider) {
+
+        boolean isEnabled = false;
+        if (serviceProvider == null) {
+            return isEnabled;
+        }
+        LocalAndOutboundAuthenticationConfig config = serviceProvider.getLocalAndOutBoundAuthenticationConfig();
+
+        if (config != null) {
+            isEnabled = config.isUseExternalConsentPage();
+        }
+        if (log.isDebugEnabled()) {
+            log.debug("External consent page: " + isEnabled + " for application: " +
+                    serviceProvider.getApplicationName() + " with id: " + serviceProvider.getApplicationID());
+        }
+        return isEnabled;
+    }
+
+    public static boolean isConsentPageRedirectParamsAllowed() {
+        return FileBasedConfigurationBuilder.getInstance().isConsentPageRedirectParamsAllowed();
+    }
+
+    /**
+     * Returns an instance of OAuthAuthzRequest. If the configured classname is invalid the default implementation
+     * will be returned.
+     *
+     * @param request http servlet request.
+     * @return instance of OAuthAuthzRequest.
+     * @throws OAuthProblemException thrown when initializing the OAuthAuthzRequestClass instance.
+     * @throws OAuthSystemException  thrown when initializing the OAuthAuthzRequestClass instance.
+     */
+    public static OAuthAuthzRequest getOAuthAuthzRequest(HttpServletRequest request)
+            throws OAuthProblemException, OAuthSystemException {
+
+        if (isDefaultOAuthAuthzRequestClassConfigured()) {
+            return new CarbonOAuthAuthzRequest(request);
+        }
+        try {
+            Class<? extends OAuthAuthzRequest> clazz = getOAuthAuthzRequestClass();
+            // Validations will be performed when initializing the class instance.
+            Constructor<?> constructor = clazz.getConstructor(HttpServletRequest.class);
+            return (OAuthAuthzRequest) constructor.newInstance(request);
+        } catch (InvocationTargetException e) {
+            // Handle OAuthProblemException & OAuthSystemException thrown from extended class.
+            if (e.getTargetException() instanceof OAuthProblemException) {
+                throw (OAuthProblemException) e.getTargetException();
+            } else if (e.getTargetException() instanceof OAuthSystemException) {
+                throw (OAuthSystemException) e.getTargetException();
+            } else {
+                log.warn("Failed to initiate OAuthAuthzRequest from identity.xml. ");
+            }
+        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException |
+                 NoSuchMethodException e) {
+            log.warn("Failed to initiate OAuthAuthzRequest from identity.xml. ");
+        }
+        log.debug("Initiating the default OAuthAuthzRequest implementation");
+        return new CarbonOAuthAuthzRequest(request);
+    }
+
+    /**
+     * Method to check whether the configured OAuthAuthzRequestImplementation is the default implementation.
+     *
+     * @return boolean whether the default class name is configured.
+     */
+    private static boolean isDefaultOAuthAuthzRequestClassConfigured() {
+
+        String oauthAuthzRequestClassName = OAuthServerConfiguration.getInstance().getOAuthAuthzRequestClassName();
+        return OAuthServerConfiguration.DEFAULT_OAUTH_AUTHZ_REQUEST_CLASSNAME.equals(oauthAuthzRequestClassName);
+    }
+
+    /**
+     * Load OAuthAuthzRequest class.
+     *
+     * @return OAuthAuthzRequest Class.
+     * @throws ClassNotFoundException when configured class name is invalid.
+     */
+    private static Class<? extends OAuthAuthzRequest> getOAuthAuthzRequestClass() throws ClassNotFoundException {
+
+        if (oAuthAuthzRequestClass == null) {
+
+            String oauthAuthzRequestClassName =
+                    OAuthServerConfiguration.getInstance().getOAuthAuthzRequestClassName();
+            oAuthAuthzRequestClass = (Class<? extends OAuthAuthzRequest>) Thread.currentThread()
+                    .getContextClassLoader().loadClass(oauthAuthzRequestClassName);
+        }
+        return oAuthAuthzRequestClass;
+    }
+
+    /**
+     * Validate the response mode against the response type as per FAPI spec.
+     * shall require;
+     * 1. the response_type value code id_token, or
+     * 2. the response_type value code in conjunction with the response_mode value jwt;
+     * <a href="https://openid.net/specs/openid-financial-api-part-2-1_0.html#authorization-server">5.2.2-2.2</a>
+     *
+     * @param responseType response mode
+     * @param responseMode response type
+     * @throws OAuthProblemException when response mode is not valid
+     */
+    public static void validateFAPIAllowedResponseTypeAndMode(String responseType, String responseMode)
+            throws OAuthProblemException {
+
+        if (!(CODE_IDTOKEN.equals(responseType) || (CODE.equals(responseType) && JWT.equals(responseMode)))) {
+            throw OAuthProblemException.error(OAuth2ErrorCodes.INVALID_REQUEST)
+                    .description("Invalid response mode provided.");
+        }
+    }
+
+    /**
+     * Cast HttpServletResponse and return as HttpServletResponseWrapper .
+     *
+     * @return HttpServletResponseWrapper Class.
+     */
+    public static HttpServletResponseWrapper getHttpServletResponseWrapper (HttpServletResponse response) {
+
+        return (HttpServletResponseWrapper) response;
+    }
 }
